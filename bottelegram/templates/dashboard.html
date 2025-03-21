@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Price Tracker{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col">
+        <h2><i class="fa fa-dashboard"></i> Dashboard</h2>
+    </div>
+</div>
+
+<div class="row mb-4">
+    <div class="col-md-4">
+        <div class="card bg-primary text-white">
+            <div class="card-body">
+                <h5 class="card-title">Utenti Totali</h5>
+                <h2 class="card-text">{{ stats.total_users }}</h2>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card bg-success text-white">
+            <div class="card-body">
+                <h5 class="card-title">Prodotti Monitorati</h5>
+                <h2 class="card-text">{{ stats.total_products }}</h2>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card bg-info text-white">
+            <div class="card-body">
+                <h5 class="card-title">Media Prodotti per Utente</h5>
+                <h2 class="card-text">{{ stats.avg_products_per_user }}</h2>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5><i class="fa fa-star"></i> Prodotti Più Monitorati</h5>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Prodotto</th>
+                                <th>Utenti</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for product in stats.popular_products %}
+                            <tr>
+                                <td>{{ product.title }}</td>
+                                <td>{{ product.count }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5><i class="fa fa-line-chart"></i> Distribuzione Prodotti</h5>
+            </div>
+            <div class="card-body">
+                <canvas id="productsDistribution"></canvas>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Grafico distribuzione prodotti
+    const ctx = document.getElementById('productsDistribution').getContext('2d');
+    new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+            labels: ['1 Prodotto', '2-3 Prodotti', '4-5 Prodotti'],
+            datasets: [{
+                data: [30, 45, 25], // questi dati dovrebbero venire dal backend
+                backgroundColor: [
+                    '#007bff',
+                    '#28a745',
+                    '#17a2b8'
+                ]
+            }]
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                legend: {
+                    position: 'bottom'
+                },
+                title: {
+                    display: true,
+                    text: 'Distribuzione Utenti per Numero di Prodotti'
+                }
+            }
+        }
+    });
+});
+</script>
+{% endblock %}
