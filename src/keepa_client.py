@@ -1,35 +1,25 @@
 """
-Client per l'interazione con le API di Keepa.
+Client per l'interazione con le API di Keepa utilizzando la libreria ufficiale.
+Documentazione: https://pypi.org/project/keepa/
 """
-import asyncio
-import aiohttp
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
-import json
+from typing import Dict, List, Any, Optional
+import keepa
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 from config.config import Config
 
 class KeepaClient:
     def __init__(self):
-        self.api_key = Config.KEEPA_API_KEY
-        self.base_url = "https://api.keepa.com"
-        self.domain = "1"  # 1 = amazon.it
+        self.api = keepa.Keepa(Config.KEEPA_API_KEY)
+        self._executor = ThreadPoolExecutor(max_workers=1)
 
     async def __aenter__(self):
-        self._session = aiohttp.ClientSession()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self._session:
-            await self._session.close()
-
-    def _convert_keepa_price(self, keepa_price: int) -> float:
-        """Converte il prezzo dal formato Keepa (intero) a euro (float)"""
-        return float(keepa_price / 100) if keepa_price != -1 else 0.0
-
-    def _convert_keepa_time(self, keepa_time: int) -> datetime:
-        """Converte il timestamp Keepa in datetime"""
-        return datetime.fromtimestamp(keepa_time * 60)
+        self._executor.shutdown(wait=True)
 
     async def search_products(self, keyword: str) -> List[Dict[str, Any]]:
         """
@@ -41,41 +31,73 @@ class KeepaClient:
         Returns:
             Lista di prodotti trovati con i loro dettagli
         """
-        if not self._session:
-            raise RuntimeError("Client non inizializzato. Usa 'async with'")
-
-        endpoint = "/query"  # Cambiato da /search a /query
-        params = {
-            "key": self.api_key,
-            "domain": self.domain,
-            "selection": {
-                "title": keyword,
-                "categoryId": None,  # Cerca in tutte le categorie
-                "priceTypes": [0],  # 0 = Amazon price
-                "deltaRange": [0, Config.PRICE_HISTORY_DAYS],  # Ultimi X giorni
-                "deltaPercent": -20,  # Cerca prodotti con almeno 20% di sconto
-                "deltaDropOnly": True,  # Solo riduzioni di prezzo
-                "sortType": 2  # Ordina per sconto percentuale
-            }
-        }
-
         try:
-            async with self._session.post(
-                f"{self.base_url}{endpoint}",
-                json=params
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return data.get("products", [])
-                else:
-                    error_text = await response.text()
-                    raise Exception(f"Keepa API error: {error_text}")
-        except aiohttp.ClientError as e:
-            raise Exception(f"Network error during Keepa search: {str(e)}")
+            # Configura i parametri di ricerca
+            finder_params = {
+                'title': keyword,
+                'category': 0,  # Tutte le categorie
+                'priceTypes': ['AMAZON'],  # Solo prezzi Amazon
+                'deltaPriceInPercent': 20,  # Minimo 20% di sconto
+                'deltaRange': Config.PRICE_HISTORY_DAYS,  # Ultimi X giorni
+                'deltaAtLeast': 1000,  # Almeno 10€ di sconto
+                'deltaLastSeen': 48,  # Visto nelle ultime 48 ore
+                'sortType': 'DELTA_PERCENT_DROPDOWN',  # Ordina per sconto percentuale
+                'itemsPerPage': 10  # Limita i risultati
+            }
 
-    async def get_product_details(self, asin: str) -> Dict[str, Any]:
+            # Esegui la ricerca in modo asincrono
+            products = await asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                lambda: self.api.product_finder(**finder_params)
+            )
+
+            if not products:
+                return []
+
+            # Ottieni i dettagli completi per i prodotti trovati
+            asins = [p.get('asin') for p in products if p.get('asin')]
+            if not asins:
+                return []
+
+            return await self.get_products_details(asins)
+
+        except Exception as e:
+            raise Exception(f"Errore durante la ricerca Keepa: {str(e)}")
+
+    async def get_products_details(self, asins: List[str]) -> List[Dict[str, Any]]:
         """
-        Ottiene i dettagli di un prodotto specifico tramite ASIN.
+        Ottiene i dettagli di più prodotti tramite i loro ASIN.
+        
+        Args:
+            asins: Lista di ASIN Amazon
+            
+        Returns:
+            Lista di dettagli dei prodotti
+        """
+        try:
+            # Configura i parametri per la query dei prodotti
+            product_params = {
+                'offers': True,  # Include le offerte
+                'update': None,  # Non forzare l'aggiornamento
+                'rating': True,  # Include le valutazioni
+                'stats': Config.PRICE_HISTORY_DAYS,  # Statistiche per gli ultimi X giorni
+                'tracking': Config.PRICE_HISTORY_DAYS  # Tracking per gli ultimi X giorni
+            }
+
+            # Ottieni i dettagli in un thread separato
+            products = await asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                lambda: self.api.query(asins, **product_params)
+            )
+
+            return [self._process_product_data(p) for p in products if p]
+
+        except Exception as e:
+            raise Exception(f"Errore durante il recupero dei dettagli prodotto: {str(e)}")
+
+    async def get_product_details(self, asin: str) -> Optional[Dict[str, Any]]:
+        """
+        Ottiene i dettagli di un singolo prodotto tramite ASIN.
         
         Args:
             asin: Amazon Standard Identification Number
@@ -83,35 +105,8 @@ class KeepaClient:
         Returns:
             Dettagli del prodotto inclusa la storia dei prezzi
         """
-        if not self._session:
-            raise RuntimeError("Client non inizializzato. Usa 'async with'")
-
-        endpoint = "/product"
-        params = {
-            "key": self.api_key,
-            "domain": self.domain,
-            "asin": asin,
-            "offers": 1,  # Include le offerte
-            "stats": Config.PRICE_HISTORY_DAYS  # Statistiche per gli ultimi X giorni
-        }
-
-        try:
-            async with self._session.get(
-                f"{self.base_url}{endpoint}",
-                params=params
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    products = data.get("products", [])
-                    if products:
-                        product = products[0]
-                        return self._process_product_data(product)
-                    raise Exception(f"Prodotto non trovato: {asin}")
-                else:
-                    error_text = await response.text()
-                    raise Exception(f"Keepa API error: {error_text}")
-        except aiohttp.ClientError as e:
-            raise Exception(f"Network error during Keepa product lookup: {str(e)}")
+        products = await self.get_products_details([asin])
+        return products[0] if products else None
 
     def _process_product_data(self, product: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -123,30 +118,38 @@ class KeepaClient:
         Returns:
             Dati del prodotto processati
         """
-        # Estrai i prezzi dalla cronologia
-        price_history = product.get("csv", [])
-        if not price_history or len(price_history) < 1:
-            return {}
+        try:
+            # Estrai i dati principali
+            stats = product.get('stats', {})
+            
+            # Ottieni i prezzi
+            current = stats.get('current', {})
+            avg30 = stats.get('avg30', {})
+            
+            current_price = current.get('price', 0.0)
+            lowest_price = avg30.get('min', 0.0)
+            highest_price = avg30.get('max', 0.0)
 
-        # Il primo array contiene i prezzi Amazon
-        amazon_prices = price_history[0]
-        valid_prices = [self._convert_keepa_price(p) for p in amazon_prices if p > 0]
-        
-        if not valid_prices:
-            return {}
+            # Calcola lo sconto
+            discount = self.calculate_discount_percentage(current_price, highest_price)
 
-        current_price = valid_prices[0] if valid_prices else 0
-        lowest_price = min(valid_prices) if valid_prices else 0
-        highest_price = max(valid_prices) if valid_prices else 0
+            return {
+                "asin": product.get('asin', ''),
+                "title": product.get('title', ''),
+                "current_price": current_price,
+                "lowest_price_30d": lowest_price,
+                "highest_price_30d": highest_price,
+                "discount_percent": discount,
+                "rating": product.get('rating', {}).get('avg', 0.0),
+                "rating_count": product.get('rating', {}).get('count', 0),
+                "category": product.get('categoryTree', [])[-1] if product.get('categoryTree') else None,
+                "image_url": product.get('imagesCSV', '').split(',')[0] if product.get('imagesCSV') else None,
+                "last_update": datetime.fromtimestamp(product.get('lastUpdate', 0)),
+                "url": f"https://www.amazon.it/dp/{product.get('asin')}"
+            }
 
-        return {
-            "asin": product.get("asin", ""),
-            "title": product.get("title", ""),
-            "current_price": current_price,
-            "lowest_price_30d": lowest_price,
-            "highest_price_30d": highest_price,
-            "image_url": f"https://images-amazon.com/images/P/{product.get('asin')}.jpg"
-        }
+        except Exception as e:
+            raise Exception(f"Errore durante il processing dei dati prodotto: {str(e)}")
 
     def calculate_discount_percentage(self, current_price: float, highest_price: float) -> float:
         """
