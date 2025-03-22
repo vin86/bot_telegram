@@ -1,7 +1,7 @@
+import asyncio
 from typing import List, Dict
 import logging
 from datetime import datetime
-import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from math import ceil
@@ -24,13 +24,17 @@ class PriceTracker:
     def setup_scheduler(self):
         """Configura lo scheduler per il controllo periodico dei prezzi"""
         self.scheduler.add_job(
-            self.check_all_products,
+            self.check_all_products_wrapper,
             trigger=IntervalTrigger(seconds=CHECK_INTERVAL),
             id='price_check',
             name='Controllo prezzi periodico',
             replace_existing=True,
             misfire_grace_time=None  # Permetti l'esecuzione ritardata
         )
+
+    def check_all_products_wrapper(self):
+        """Wrapper sincrono per il metodo asincrono check_all_products"""
+        asyncio.create_task(self.check_all_products())
 async def start(self):
     """Avvia lo scheduler"""
     if not self.scheduler.running:
