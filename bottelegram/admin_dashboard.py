@@ -91,6 +91,13 @@ def get_general_stats():
         "popular_products": popular_products
     }
 
+@app.route('/logout')
+@login_required
+def logout():
+    """Gestisce il logout dell'utente"""
+    logout_user()
+    return redirect(url_for('login'))
+
 @app.route('/api/users/<int:user_id>/products')
 @login_required
 def get_user_products(user_id):
