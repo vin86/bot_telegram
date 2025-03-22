@@ -9,6 +9,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import logging
 import json
+import numpy as np
 
 from config.config import Config
 
@@ -32,15 +33,19 @@ class KeepaClient:
             if hasattr(price, 'item'):
                 price = price.item()
 
-            # Gestione del tipo numpy.float deprecato
-            if isinstance(price, (int, float)):
-                price_float = float(price)
+            # Controllo se è un tipo NumPy
+            if hasattr(np, 'ndarray') and isinstance(price, np.ndarray):
+                price = float(price)
+            elif hasattr(np, 'number') and isinstance(price, np.number):
+                price = float(price)
+            elif isinstance(price, (int, float)):
+                price = float(price)
             else:
                 raise TypeError(f"Tipo non supportato: {type(price)}")
             
-            if price_float <= 0:
+            if price <= 0:
                 return 0.0
-            return price_float / 100.0
+            return price / 100.0
         except (TypeError, ValueError) as e:
             logger.debug(f"Errore nella conversione del prezzo: {price}, tipo: {type(price)}, errore: {str(e)}")
             return 0.0
