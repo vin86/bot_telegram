@@ -14,7 +14,6 @@ class KeepaClient:
         self.api_key = Config.KEEPA_API_KEY
         self.base_url = "https://api.keepa.com"
         self.domain = "1"  # 1 = amazon.it
-        self._session: Optional[aiohttp.ClientSession] = None
 
     async def __aenter__(self):
         self._session = aiohttp.ClientSession()
@@ -49,7 +48,7 @@ class KeepaClient:
         params = {
             "key": self.api_key,
             "domain": self.domain,
-            "type": 0,  # Ricerca per keyword
+            "type": "search",  # Modificato da 0 a "search"
             "term": keyword
         }
 
@@ -85,7 +84,7 @@ class KeepaClient:
             "key": self.api_key,
             "domain": self.domain,
             "asin": asin,
-            "history": "1"  # Include la storia dei prezzi
+            "stats": "1"  # Include le statistiche dei prezzi
         }
 
         try:
@@ -116,44 +115,16 @@ class KeepaClient:
         Returns:
             Dati del prodotto processati
         """
-        # Estrai la storia dei prezzi degli ultimi 30 giorni
-        now = datetime.now()
-        thirty_days_ago = now - timedelta(days=Config.PRICE_HISTORY_DAYS)
+        stats = product.get("stats", {})
+        current = stats.get("current", {})
+        avg30 = stats.get("avg30", {})
         
-        # Converti i timestamp Keepa in datetime
-        csv = product.get("csv", [])
-        if not csv:
-            return {}
-
-        # Ottieni i prezzi Amazon (indice 0 nell'array csv)
-        amazon_prices = csv[0]
-        if not amazon_prices:
-            return {}
-
-        # Analizza la storia dei prezzi
-        prices_30d = []
-        for i in range(0, len(amazon_prices), 2):
-            if i + 1 < len(amazon_prices):
-                price = self._convert_keepa_price(amazon_prices[i])
-                timestamp = self._convert_keepa_time(amazon_prices[i + 1])
-                
-                if timestamp >= thirty_days_ago:
-                    prices_30d.append(price)
-
-        if not prices_30d:
-            return {}
-
-        current_price = prices_30d[0] if prices_30d else 0
-        lowest_price = min(price for price in prices_30d if price > 0)
-        highest_price = max(prices_30d)
-
         return {
             "asin": product.get("asin", ""),
             "title": product.get("title", ""),
-            "current_price": current_price,
-            "lowest_price_30d": lowest_price,
-            "highest_price_30d": highest_price,
-            "price_history": prices_30d,
+            "current_price": current.get("price", 0.0),
+            "lowest_price_30d": avg30.get("min", 0.0),
+            "highest_price_30d": avg30.get("max", 0.0),
             "image_url": product.get("imagesCSV", "").split(",")[0] if product.get("imagesCSV") else None
         }
 
