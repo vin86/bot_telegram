@@ -56,10 +56,14 @@ async def main():
             await start_bot(application)
         except KeyboardInterrupt:
             logger.info("Interruzione manuale rilevata")
+            await stop_bot(application)
         except Exception as e:
             logger.error(f"Errore durante l'esecuzione del bot: {str(e)}")
-        finally:
+            await application.initialize()  # Ensure proper initialization
             await stop_bot(application)
+        finally:
+            if application:
+                await stop_bot(application)
 
     except Exception as e:
         logger.error(f"Errore durante l'avvio del bot: {str(e)}")
