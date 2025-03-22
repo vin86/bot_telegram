@@ -68,11 +68,8 @@ class BotManager:
             bool: True se il prodotto è stato processato con successo
         """
         try:
-            current_price = product_data['current_price']
-            highest_price = product_data['highest_price_30d']
-            
-            # Calcola lo sconto
-            discount = ((highest_price - current_price) / highest_price) * 100 if highest_price > 0 else 0
+            # Se il prodotto ha già uno sconto calcolato da Keepa
+            discount = product_data.get('discount_percent', 0)
             
             # Se lo sconto supera la soglia minima
             if discount >= Config.MINIMUM_DISCOUNT_PERCENT:
@@ -80,9 +77,9 @@ class BotManager:
                 self.db.update_product(
                     asin=product_data['asin'],
                     title=product_data['title'],
-                    current_price=current_price,
+                    current_price=product_data['current_price'],
                     lowest_price_30d=product_data['lowest_price_30d'],
-                    highest_price_30d=highest_price,
+                    highest_price_30d=product_data['highest_price_30d'],
                     keyword_id=keyword_id
                 )
                 
@@ -91,7 +88,7 @@ class BotManager:
                 if await self.telegram.send_message(message):
                     logger.info(f"Notifica inviata per il prodotto: {product_data['asin']}")
                     return True
-                
+            
             return False
         except Exception as e:
             logger.error(f"Errore nel controllo del prodotto {product_data.get('asin')}: {str(e)}")
@@ -108,10 +105,9 @@ class BotManager:
                     products = await keepa.search_products(keyword.keyword)
                     
                     for product in products:
-                        # Ottieni dettagli completi del prodotto
-                        details = await keepa.get_product_details(product['asin'])
-                        if details:
-                            await self.check_product(details, keyword.id)
+                        await self.check_product(product, keyword.id)
+                        # Piccola pausa tra i prodotti per non sovraccaricare Telegram
+                        await asyncio.sleep(1)
                             
                     # Aggiorna il timestamp dell'ultimo controllo
                     keyword.last_check = datetime.utcnow()
@@ -120,7 +116,7 @@ class BotManager:
                     logger.error(f"Errore nel monitoraggio della keyword {keyword.keyword}: {str(e)}")
                     continue
                 
-                # Piccola pausa tra le keyword per rispettare i rate limit
+                # Pausa tra le keyword per rispettare i rate limit di Keepa
                 await asyncio.sleep(2)
 
     async def run(self):
