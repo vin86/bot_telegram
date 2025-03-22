@@ -7,9 +7,11 @@ from typing import Dict, List, Any, Optional
 import keepa
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-import numpy as np
+import logging
 
 from config.config import Config
+
+logger = logging.getLogger(__name__)
 
 class KeepaClient:
     def __init__(self):
@@ -21,6 +23,22 @@ class KeepaClient:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         self._executor.shutdown(wait=True)
+
+    def _safe_float_conversion(self, value: Any) -> float:
+        """Converte in modo sicuro un valore a float"""
+        try:
+            if hasattr(value, 'item'):  # Per gestire i tipi numpy
+                value = value.item()
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _convert_keepa_price(self, price: Any) -> float:
+        """Converte il prezzo da centesimi di euro a euro"""
+        price_float = self._safe_float_conversion(price)
+        if price_float <= 0:
+            return 0.0
+        return price_float / 100.0
 
     async def search_products(self, keyword: str) -> List[Dict[str, Any]]:
         """
@@ -35,7 +53,7 @@ class KeepaClient:
         try:
             # Configura i parametri di ricerca come un dizionario
             product_parms = {
-                'title': keyword
+                'author': keyword  # Usa author invece di title come suggerito nella documentazione
             }
 
             # Esegui la ricerca in modo asincrono
@@ -56,7 +74,8 @@ class KeepaClient:
             return await self.get_products_details(asins)
 
         except Exception as e:
-            raise Exception(f"Errore durante la ricerca Keepa: {str(e)}")
+            logger.error(f"Errore durante la ricerca Keepa: {str(e)}")
+            return []
 
     async def get_products_details(self, asins: List[str]) -> List[Dict[str, Any]]:
         """
@@ -78,32 +97,20 @@ class KeepaClient:
             # Processa solo i prodotti validi
             processed_products = []
             for product in products:
-                if product:
+                if product and isinstance(product, dict):
                     try:
                         processed = self._process_product_data(product)
                         if processed:
                             processed_products.append(processed)
                     except Exception as e:
-                        print(f"Errore nel processing del prodotto: {str(e)}")
+                        logger.error(f"Errore nel processing del prodotto: {str(e)}")
                         continue
 
             return processed_products
 
         except Exception as e:
-            raise Exception(f"Errore durante il recupero dei dettagli prodotto: {str(e)}")
-
-    async def get_product_details(self, asin: str) -> Optional[Dict[str, Any]]:
-        """
-        Ottiene i dettagli di un singolo prodotto tramite ASIN.
-        
-        Args:
-            asin: Amazon Standard Identification Number
-            
-        Returns:
-            Dettagli del prodotto inclusa la storia dei prezzi
-        """
-        products = await self.get_products_details([asin])
-        return products[0] if products else None
+            logger.error(f"Errore durante il recupero dei dettagli prodotto: {str(e)}")
+            return []
 
     def _process_product_data(self, product: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
@@ -116,29 +123,29 @@ class KeepaClient:
             Dati del prodotto processati
         """
         try:
-            # Estrai i prezzi da product['data']
-            if not isinstance(product, dict) or 'data' not in product:
+            # Estrai i prezzi
+            csv = product.get('csv', [])
+            if not csv or len(csv) < 1:
                 return None
 
-            data = product['data']
-            
-            # Ottieni lo storico prezzi Amazon
-            amazon_prices = data.get('AMAZON', [])
-            if not amazon_prices or not isinstance(amazon_prices, (list, np.ndarray)):
+            # I prezzi Amazon sono nel primo array
+            amazon_prices = csv[0]
+            if not amazon_prices:
                 return None
 
-            # Converti l'array numpy in lista e rimuovi i valori non validi
-            prices = []
+            # Converti i prezzi da centesimi a euro e filtra i valori validi
+            valid_prices = []
             for price in amazon_prices:
-                if isinstance(price, (int, float, np.int64, np.float64)) and price > 0:
-                    prices.append(float(price) / 100)  # Converti centesimi in euro
+                converted_price = self._convert_keepa_price(price)
+                if converted_price > 0:
+                    valid_prices.append(converted_price)
 
-            if not prices:
+            if not valid_prices:
                 return None
 
-            current_price = prices[-1]  # Ultimo prezzo disponibile
-            lowest_price = min(prices)
-            highest_price = max(prices)
+            current_price = valid_prices[-1]  # Ultimo prezzo disponibile
+            lowest_price = min(valid_prices)
+            highest_price = max(valid_prices)
             
             # Calcola lo sconto
             discount = self.calculate_discount_percentage(current_price, highest_price)
@@ -146,16 +153,16 @@ class KeepaClient:
             return {
                 "asin": str(product.get('asin', '')),
                 "title": str(product.get('title', '')),
-                "current_price": float(current_price),
-                "lowest_price_30d": float(lowest_price),
-                "highest_price_30d": float(highest_price),
-                "discount_percent": float(discount),
+                "current_price": current_price,
+                "lowest_price_30d": lowest_price,
+                "highest_price_30d": highest_price,
+                "discount_percent": discount,
                 "url": f"https://www.amazon.it/dp/{product.get('asin')}",
                 "image_url": f"https://images-amazon.com/images/P/{product.get('asin')}.jpg"
             }
 
         except Exception as e:
-            print(f"Errore nel processing dei dati del prodotto: {str(e)}")
+            logger.error(f"Errore nel processing dei dati del prodotto: {str(e)}")
             return None
 
     def calculate_discount_percentage(self, current_price: float, highest_price: float) -> float:
@@ -173,6 +180,19 @@ class KeepaClient:
             if highest_price <= 0 or current_price <= 0:
                 return 0.0
             discount = ((highest_price - current_price) / highest_price) * 100
-            return round(float(discount), 2)
+            return round(discount, 2)
         except:
             return 0.0
+
+    async def get_product_details(self, asin: str) -> Optional[Dict[str, Any]]:
+        """
+        Ottiene i dettagli di un singolo prodotto tramite ASIN.
+        
+        Args:
+            asin: Amazon Standard Identification Number
+            
+        Returns:
+            Dettagli del prodotto inclusa la storia dei prezzi
+        """
+        products = await self.get_products_details([asin])
+        return products[0] if products else None
