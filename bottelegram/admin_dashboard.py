@@ -22,6 +22,13 @@ def load_user(username):
         return Admin(username)
     return None
 
+@app.route('/logout')
+@login_required
+def logout():
+    """Gestisce il logout dell'utente"""
+    logout_user()
+    return redirect(url_for('login'))
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
