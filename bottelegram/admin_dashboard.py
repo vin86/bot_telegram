@@ -1,9 +1,8 @@
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, redirect, url_for
 from functools import wraps
 import os
 from database import db
 from config import ADMIN_USERNAME, ADMIN_PASSWORD
-import flask_login
 from flask_login import LoginManager, UserMixin, login_required, login_user, logout_user
 
 app = Flask(__name__)
@@ -30,7 +29,7 @@ def login():
         password = request.form['password']
         if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
             login_user(Admin(username))
-            return flask_login.redirect(flask_login.url_for('dashboard'))
+            return redirect(url_for('dashboard'))
         return 'Credenziali non valide'
     return render_template('login.html')
 
