@@ -2,7 +2,7 @@ from typing import List, Dict
 import logging
 from datetime import datetime
 import asyncio
-from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from math import ceil
 from telegram import Bot
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class PriceTracker:
     def __init__(self, bot: Bot):
         self.bot = bot
-        self.scheduler = BackgroundScheduler()
+        self.scheduler = AsyncIOScheduler()
         self.setup_scheduler()
 
     def setup_scheduler(self):
@@ -28,17 +28,20 @@ class PriceTracker:
             trigger=IntervalTrigger(seconds=CHECK_INTERVAL),
             id='price_check',
             name='Controllo prezzi periodico',
-            replace_existing=True
+            replace_existing=True,
+            misfire_grace_time=None  # Permetti l'esecuzione ritardata
         )
-
-    def start(self):
-        """Avvia lo scheduler"""
+async def start(self):
+    """Avvia lo scheduler"""
+    if not self.scheduler.running:
         self.scheduler.start()
         logger.info("Price tracker avviato")
 
-    def stop(self):
-        """Ferma lo scheduler"""
-        self.scheduler.shutdown()
+async def stop(self):
+    """Ferma lo scheduler"""
+    if self.scheduler.running:
+        self.scheduler.shutdown(wait=False)
+        logger.info("Price tracker fermato")
         logger.info("Price tracker fermato")
 
     async def check_all_products(self):
