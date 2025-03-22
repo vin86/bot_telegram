@@ -66,9 +66,8 @@ async def main():
         raise
 
 if __name__ == '__main__':
-    try:
-        # Carica le variabili d'ambiente
-        load_dotenv()
-        
-        # Avvia il bot
-        asyncio.run(main())
+    # Carica le variabili d'ambiente
+    load_dotenv()
+    
+    # Avvia il bot
+    asyncio.run(main())
