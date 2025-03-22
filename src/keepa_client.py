@@ -31,8 +31,13 @@ class KeepaClient:
             # Se è un oggetto con metodo item(), usalo
             if hasattr(price, 'item'):
                 price = price.item()
+
+            # Gestione del tipo numpy.float deprecato
+            if isinstance(price, (int, float)):
+                price_float = float(price)
+            else:
+                raise TypeError(f"Tipo non supportato: {type(price)}")
             
-            price_float = float(price)
             if price_float <= 0:
                 return 0.0
             return price_float / 100.0
