@@ -7,6 +7,7 @@ from typing import Dict, List, Any, Optional
 import keepa
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import numpy as np
 
 from config.config import Config
 
@@ -75,7 +76,18 @@ class KeepaClient:
             )
 
             # Processa solo i prodotti validi
-            return [self._process_product_data(p) for p in products if p]
+            processed_products = []
+            for product in products:
+                if product:
+                    try:
+                        processed = self._process_product_data(product)
+                        if processed:
+                            processed_products.append(processed)
+                    except Exception as e:
+                        print(f"Errore nel processing del prodotto: {str(e)}")
+                        continue
+
+            return processed_products
 
         except Exception as e:
             raise Exception(f"Errore durante il recupero dei dettagli prodotto: {str(e)}")
@@ -93,7 +105,7 @@ class KeepaClient:
         products = await self.get_products_details([asin])
         return products[0] if products else None
 
-    def _process_product_data(self, product: Dict[str, Any]) -> Dict[str, Any]:
+    def _process_product_data(self, product: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
         Processa i dati grezzi del prodotto da Keepa.
         
@@ -104,42 +116,47 @@ class KeepaClient:
             Dati del prodotto processati
         """
         try:
-            # Estrai lo storico dei prezzi
-            price_history = product.get('data', {}).get('AMAZON', [])
-            
-            # Calcola i prezzi rilevanti
-            current_price = 0
-            prices_30d = []
-            
-            if price_history:
-                # Converti i prezzi da keepa (centesimi) a euro
-                valid_prices = [p/100 for p in price_history if p > 0]
-                if valid_prices:
-                    current_price = valid_prices[-1]  # Ultimo prezzo valido
-                    prices_30d = valid_prices[-30:]  # Ultimi 30 prezzi
+            # Estrai i prezzi da product['data']
+            if not isinstance(product, dict) or 'data' not in product:
+                return None
 
-            # Calcola il prezzo più basso e più alto degli ultimi 30 giorni
-            lowest_price = min(prices_30d) if prices_30d else 0
-            highest_price = max(prices_30d) if prices_30d else 0
+            data = product['data']
+            
+            # Ottieni lo storico prezzi Amazon
+            amazon_prices = data.get('AMAZON', [])
+            if not amazon_prices or not isinstance(amazon_prices, (list, np.ndarray)):
+                return None
+
+            # Converti l'array numpy in lista e rimuovi i valori non validi
+            prices = []
+            for price in amazon_prices:
+                if isinstance(price, (int, float, np.int64, np.float64)) and price > 0:
+                    prices.append(float(price) / 100)  # Converti centesimi in euro
+
+            if not prices:
+                return None
+
+            current_price = prices[-1]  # Ultimo prezzo disponibile
+            lowest_price = min(prices)
+            highest_price = max(prices)
             
             # Calcola lo sconto
             discount = self.calculate_discount_percentage(current_price, highest_price)
 
             return {
-                "asin": product.get('asin', ''),
-                "title": product.get('title', ''),
-                "current_price": current_price,
-                "lowest_price_30d": lowest_price,
-                "highest_price_30d": highest_price,
-                "discount_percent": discount,
-                "rating": product.get('stats', {}).get('rating', 0.0),
-                "rating_count": product.get('stats', {}).get('count', 0),
+                "asin": str(product.get('asin', '')),
+                "title": str(product.get('title', '')),
+                "current_price": float(current_price),
+                "lowest_price_30d": float(lowest_price),
+                "highest_price_30d": float(highest_price),
+                "discount_percent": float(discount),
                 "url": f"https://www.amazon.it/dp/{product.get('asin')}",
                 "image_url": f"https://images-amazon.com/images/P/{product.get('asin')}.jpg"
             }
 
         except Exception as e:
-            raise Exception(f"Errore durante il processing dei dati prodotto: {str(e)}")
+            print(f"Errore nel processing dei dati del prodotto: {str(e)}")
+            return None
 
     def calculate_discount_percentage(self, current_price: float, highest_price: float) -> float:
         """
@@ -152,7 +169,10 @@ class KeepaClient:
         Returns:
             Percentuale di sconto
         """
-        if highest_price <= 0 or current_price <= 0:
+        try:
+            if highest_price <= 0 or current_price <= 0:
+                return 0.0
+            discount = ((highest_price - current_price) / highest_price) * 100
+            return round(float(discount), 2)
+        except:
             return 0.0
-        discount = ((highest_price - current_price) / highest_price) * 100
-        return round(discount, 2)
