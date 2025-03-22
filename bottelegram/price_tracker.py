@@ -35,18 +35,18 @@ class PriceTracker:
     def check_all_products_wrapper(self):
         """Wrapper sincrono per il metodo asincrono check_all_products"""
         asyncio.create_task(self.check_all_products())
-async def start(self):
-    """Avvia lo scheduler"""
-    if not self.scheduler.running:
-        self.scheduler.start()
-        logger.info("Price tracker avviato")
 
-async def stop(self):
-    """Ferma lo scheduler"""
-    if self.scheduler.running:
-        self.scheduler.shutdown(wait=False)
-        logger.info("Price tracker fermato")
-        logger.info("Price tracker fermato")
+    async def start(self):
+        """Avvia lo scheduler"""
+        if not self.scheduler.running:
+            self.scheduler.start()
+            logger.info("Price tracker avviato")
+
+    async def stop(self):
+        """Ferma lo scheduler"""
+        if self.scheduler.running:
+            self.scheduler.shutdown(wait=False)
+            logger.info("Price tracker fermato")
 
     async def check_all_products(self):
         """Controlla i prezzi di tutti i prodotti attivi in batch"""
