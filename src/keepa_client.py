@@ -24,21 +24,15 @@ class KeepaClient:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         self._executor.shutdown(wait=True)
 
-    def _safe_float_conversion(self, value: Any) -> float:
-        """Converte in modo sicuro un valore a float"""
-        try:
-            if hasattr(value, 'item'):  # Per gestire i tipi numpy
-                value = value.item()
-            return float(value)
-        except (TypeError, ValueError):
-            return 0.0
-
     def _convert_keepa_price(self, price: Any) -> float:
         """Converte il prezzo da centesimi di euro a euro"""
-        price_float = self._safe_float_conversion(price)
-        if price_float <= 0:
+        try:
+            price_float = float(price)
+            if price_float <= 0:
+                return 0.0
+            return price_float / 100.0
+        except (TypeError, ValueError):
             return 0.0
-        return price_float / 100.0
 
     async def search_products(self, keyword: str) -> List[Dict[str, Any]]:
         """
@@ -51,12 +45,10 @@ class KeepaClient:
             Lista di prodotti trovati con i loro dettagli
         """
         try:
-            # Configura i parametri di ricerca come un dizionario
             product_parms = {
-                'author': keyword  # Usa author invece di title come suggerito nella documentazione
+                'author': keyword
             }
 
-            # Esegui la ricerca in modo asincrono
             products = await asyncio.get_event_loop().run_in_executor(
                 self._executor,
                 lambda: self.api.product_finder(product_parms)
@@ -65,12 +57,10 @@ class KeepaClient:
             if not products:
                 return []
 
-            # Filtra gli ASIN validi
             asins = [p for p in products if isinstance(p, str)][:10]
             if not asins:
                 return []
 
-            # Ottieni i dettagli completi per i prodotti trovati
             return await self.get_products_details(asins)
 
         except Exception as e:
@@ -88,13 +78,11 @@ class KeepaClient:
             Lista di dettagli dei prodotti
         """
         try:
-            # Ottieni i dettagli in un thread separato
             products = await asyncio.get_event_loop().run_in_executor(
                 self._executor,
                 lambda: self.api.query(asins)
             )
 
-            # Processa solo i prodotti validi
             processed_products = []
             for product in products:
                 if product and isinstance(product, dict):
@@ -123,17 +111,14 @@ class KeepaClient:
             Dati del prodotto processati
         """
         try:
-            # Estrai i prezzi
             csv = product.get('csv', [])
             if not csv or len(csv) < 1:
                 return None
 
-            # I prezzi Amazon sono nel primo array
             amazon_prices = csv[0]
             if not amazon_prices:
                 return None
 
-            # Converti i prezzi da centesimi a euro e filtra i valori validi
             valid_prices = []
             for price in amazon_prices:
                 converted_price = self._convert_keepa_price(price)
@@ -143,11 +128,9 @@ class KeepaClient:
             if not valid_prices:
                 return None
 
-            current_price = valid_prices[-1]  # Ultimo prezzo disponibile
+            current_price = valid_prices[-1]
             lowest_price = min(valid_prices)
             highest_price = max(valid_prices)
-            
-            # Calcola lo sconto
             discount = self.calculate_discount_percentage(current_price, highest_price)
 
             return {
