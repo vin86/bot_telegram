@@ -33,7 +33,7 @@ async def main():
         # Crea e avvia il price tracker
         price_tracker = PriceTracker(application.bot)
         application.bot_data['price_tracker'] = price_tracker
-        price_tracker.start()
+        await price_tracker.start()
 
         # Inizializza e avvia il polling
         await application.initialize()
@@ -46,7 +46,7 @@ async def main():
         try:
             # Ferma prima il price tracker
             if price_tracker:
-                price_tracker.stop()
+                await price_tracker.stop()
             # Poi chiudi l'applicazione
             await application.shutdown()
         except Exception as e:
