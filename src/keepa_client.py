@@ -32,33 +32,26 @@ class KeepaClient:
             Lista di prodotti trovati con i loro dettagli
         """
         try:
-            # Configura i parametri di ricerca
-            finder_params = {
-                'title': keyword,
-                'category': 0,  # Tutte le categorie
-                'priceTypes': ['AMAZON'],  # Solo prezzi Amazon
-                'deltaPriceInPercent': 20,  # Minimo 20% di sconto
-                'deltaRange': Config.PRICE_HISTORY_DAYS,  # Ultimi X giorni
-                'deltaAtLeast': 1000,  # Almeno 10€ di sconto
-                'deltaLastSeen': 48,  # Visto nelle ultime 48 ore
-                'sortType': 'DELTA_PERCENT_DROPDOWN',  # Ordina per sconto percentuale
-                'itemsPerPage': 10  # Limita i risultati
+            # Configura i parametri di ricerca come un dizionario
+            product_parms = {
+                'title': keyword
             }
 
             # Esegui la ricerca in modo asincrono
             products = await asyncio.get_event_loop().run_in_executor(
                 self._executor,
-                lambda: self.api.product_finder(**finder_params)
+                lambda: self.api.product_finder(product_parms)
             )
 
             if not products:
                 return []
 
-            # Ottieni i dettagli completi per i prodotti trovati
-            asins = [p.get('asin') for p in products if p.get('asin')]
+            # Filtra gli ASIN validi
+            asins = [p for p in products if isinstance(p, str)][:10]
             if not asins:
                 return []
 
+            # Ottieni i dettagli completi per i prodotti trovati
             return await self.get_products_details(asins)
 
         except Exception as e:
@@ -75,21 +68,13 @@ class KeepaClient:
             Lista di dettagli dei prodotti
         """
         try:
-            # Configura i parametri per la query dei prodotti
-            product_params = {
-                'offers': True,  # Include le offerte
-                'update': None,  # Non forzare l'aggiornamento
-                'rating': True,  # Include le valutazioni
-                'stats': Config.PRICE_HISTORY_DAYS,  # Statistiche per gli ultimi X giorni
-                'tracking': Config.PRICE_HISTORY_DAYS  # Tracking per gli ultimi X giorni
-            }
-
             # Ottieni i dettagli in un thread separato
             products = await asyncio.get_event_loop().run_in_executor(
                 self._executor,
-                lambda: self.api.query(asins, **product_params)
+                lambda: self.api.query(asins)
             )
 
+            # Processa solo i prodotti validi
             return [self._process_product_data(p) for p in products if p]
 
         except Exception as e:
@@ -119,17 +104,24 @@ class KeepaClient:
             Dati del prodotto processati
         """
         try:
-            # Estrai i dati principali
-            stats = product.get('stats', {})
+            # Estrai lo storico dei prezzi
+            price_history = product.get('data', {}).get('AMAZON', [])
             
-            # Ottieni i prezzi
-            current = stats.get('current', {})
-            avg30 = stats.get('avg30', {})
+            # Calcola i prezzi rilevanti
+            current_price = 0
+            prices_30d = []
             
-            current_price = current.get('price', 0.0)
-            lowest_price = avg30.get('min', 0.0)
-            highest_price = avg30.get('max', 0.0)
+            if price_history:
+                # Converti i prezzi da keepa (centesimi) a euro
+                valid_prices = [p/100 for p in price_history if p > 0]
+                if valid_prices:
+                    current_price = valid_prices[-1]  # Ultimo prezzo valido
+                    prices_30d = valid_prices[-30:]  # Ultimi 30 prezzi
 
+            # Calcola il prezzo più basso e più alto degli ultimi 30 giorni
+            lowest_price = min(prices_30d) if prices_30d else 0
+            highest_price = max(prices_30d) if prices_30d else 0
+            
             # Calcola lo sconto
             discount = self.calculate_discount_percentage(current_price, highest_price)
 
@@ -140,12 +132,10 @@ class KeepaClient:
                 "lowest_price_30d": lowest_price,
                 "highest_price_30d": highest_price,
                 "discount_percent": discount,
-                "rating": product.get('rating', {}).get('avg', 0.0),
-                "rating_count": product.get('rating', {}).get('count', 0),
-                "category": product.get('categoryTree', [])[-1] if product.get('categoryTree') else None,
-                "image_url": product.get('imagesCSV', '').split(',')[0] if product.get('imagesCSV') else None,
-                "last_update": datetime.fromtimestamp(product.get('lastUpdate', 0)),
-                "url": f"https://www.amazon.it/dp/{product.get('asin')}"
+                "rating": product.get('stats', {}).get('rating', 0.0),
+                "rating_count": product.get('stats', {}).get('count', 0),
+                "url": f"https://www.amazon.it/dp/{product.get('asin')}",
+                "image_url": f"https://images-amazon.com/images/P/{product.get('asin')}.jpg"
             }
 
         except Exception as e:
