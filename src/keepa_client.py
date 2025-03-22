@@ -44,18 +44,25 @@ class KeepaClient:
         if not self._session:
             raise RuntimeError("Client non inizializzato. Usa 'async with'")
 
-        endpoint = "/search"
+        endpoint = "/query"  # Cambiato da /search a /query
         params = {
             "key": self.api_key,
             "domain": self.domain,
-            "type": "search",  # Modificato da 0 a "search"
-            "term": keyword
+            "selection": {
+                "title": keyword,
+                "categoryId": None,  # Cerca in tutte le categorie
+                "priceTypes": [0],  # 0 = Amazon price
+                "deltaRange": [0, Config.PRICE_HISTORY_DAYS],  # Ultimi X giorni
+                "deltaPercent": -20,  # Cerca prodotti con almeno 20% di sconto
+                "deltaDropOnly": True,  # Solo riduzioni di prezzo
+                "sortType": 2  # Ordina per sconto percentuale
+            }
         }
 
         try:
-            async with self._session.get(
+            async with self._session.post(
                 f"{self.base_url}{endpoint}",
-                params=params
+                json=params
             ) as response:
                 if response.status == 200:
                     data = await response.json()
@@ -84,7 +91,8 @@ class KeepaClient:
             "key": self.api_key,
             "domain": self.domain,
             "asin": asin,
-            "stats": "1"  # Include le statistiche dei prezzi
+            "offers": 1,  # Include le offerte
+            "stats": Config.PRICE_HISTORY_DAYS  # Statistiche per gli ultimi X giorni
         }
 
         try:
@@ -115,17 +123,29 @@ class KeepaClient:
         Returns:
             Dati del prodotto processati
         """
-        stats = product.get("stats", {})
-        current = stats.get("current", {})
-        avg30 = stats.get("avg30", {})
+        # Estrai i prezzi dalla cronologia
+        price_history = product.get("csv", [])
+        if not price_history or len(price_history) < 1:
+            return {}
+
+        # Il primo array contiene i prezzi Amazon
+        amazon_prices = price_history[0]
+        valid_prices = [self._convert_keepa_price(p) for p in amazon_prices if p > 0]
         
+        if not valid_prices:
+            return {}
+
+        current_price = valid_prices[0] if valid_prices else 0
+        lowest_price = min(valid_prices) if valid_prices else 0
+        highest_price = max(valid_prices) if valid_prices else 0
+
         return {
             "asin": product.get("asin", ""),
             "title": product.get("title", ""),
-            "current_price": current.get("price", 0.0),
-            "lowest_price_30d": avg30.get("min", 0.0),
-            "highest_price_30d": avg30.get("max", 0.0),
-            "image_url": product.get("imagesCSV", "").split(",")[0] if product.get("imagesCSV") else None
+            "current_price": current_price,
+            "lowest_price_30d": lowest_price,
+            "highest_price_30d": highest_price,
+            "image_url": f"https://images-amazon.com/images/P/{product.get('asin')}.jpg"
         }
 
     def calculate_discount_percentage(self, current_price: float, highest_price: float) -> float:
