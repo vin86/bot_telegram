@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+
+{% block title %}{{ user.username }} - Dettaglio Utente{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col">
+        <h2>
+            <i class="fa fa-user"></i> Dettaglio Utente
+            <a href="{{ url_for('users_list') }}" class="btn btn-secondary float-end">
+                <i class="fa fa-arrow-left"></i> Torna alla lista
+            </a>
+        </h2>
+    </div>
+</div>
+
+<div class="row mb-4">
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header">
+                <h5>Informazioni Utente</h5>
+            </div>
+            <div class="card-body">
+                <dl class="row">
+                    <dt class="col-sm-5">ID Telegram:</dt>
+                    <dd class="col-sm-7">{{ user.telegram_id }}</dd>
+                    
+                    <dt class="col-sm-5">Username:</dt>
+                    <dd class="col-sm-7">{{ user.username }}</dd>
+                    
+                    <dt class="col-sm-5">Registrato il:</dt>
+                    <dd class="col-sm-7">{{ user.created_at.strftime('%d/%m/%Y %H:%M') }}</dd>
+                    
+                    <dt class="col-sm-5">Prodotti:</dt>
+                    <dd class="col-sm-7">{{ products|length }}</dd>
+                </dl>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header">
+                <h5>Statistiche Prodotti</h5>
+            </div>
+            <div class="card-body">
+                <canvas id="priceHistory"></canvas>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h5>Prodotti Monitorati</h5>
+    </div>
+    <div class="card-body">
+        <div class="table-responsive">
+            <table class="table table-hover">
+                <thead>
+                    <tr>
+                        <th>Prodotto</th>
+                        <th>Prezzo Attuale</th>
+                        <th>Prezzo Target</th>
+                        <th>Prezzo Minimo (30gg)</th>
+                        <th>Prezzo più basso</th>
+                        <th>Ultimo Check</th>
+                        <th>Azioni</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for product in products %}
+                    <tr>
+                        <td>
+                            <img src="{{ product.image_url }}" alt="Thumbnail" style="height: 30px; width: auto;" class="me-2">
+                            {{ product.title[:50] }}...
+                        </td>
+                        <td>€{{ "%.2f"|format(product.current_price) }}</td>
+                        <td>€{{ "%.2f"|format(product.target_price) }}</td>
+                        <td>€{{ "%.2f"|format(product.min_historic_price) }}</td>
+                        <td>€{{ "%.2f"|format(product.all_time_min_price) }}</td>
+                        <td>{{ product.last_checked.strftime('%d/%m/%Y %H:%M') }}</td>
+                        <td>
+                            <a href="{{ product.url }}" target="_blank" class="btn btn-sm btn-primary">
+                                <i class="fa fa-external-link"></i> Amazon
+                            </a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Grafico storico prezzi
+    const ctx = document.getElementById('priceHistory').getContext('2d');
+    new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: [{% for product in products %}"{{ product.title[:20] }}..."{% if not loop.last %}, {% endif %}{% endfor %}],
+            datasets: [{
+                label: 'Prezzo Attuale vs Target',
+                data: [{% for product in products %}{{ product.current_price }}{% if not loop.last %}, {% endif %}{% endfor %}],
+                borderColor: 'rgb(75, 192, 192)',
+                tension: 0.1
+            }, {
+                label: 'Prezzo Target',
+                data: [{% for product in products %}{{ product.target_price }}{% if not loop.last %}, {% endif %}{% endfor %}],
+                borderColor: 'rgb(255, 99, 132)',
+                borderDash: [5, 5],
+                tension: 0.1
+            }]
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                title: {
+                    display: true,
+                    text: 'Confronto Prezzi Attuali vs Target'
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    title: {
+                        display: true,
+                        text: 'Prezzo (€)'
+                    }
+                }
+            }
+        }
+    });
+});
+</script>
+{% endblock %}
