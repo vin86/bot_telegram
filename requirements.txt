@@ -1,0 +1,7 @@
+python-telegram-bot==20.8
+keepa==2.3.0
+SQLAlchemy==2.0.27
+Pillow==10.2.0
+aiohttp==3.9.3
+python-dotenv==1.0.1
+asyncio==3.4.3
