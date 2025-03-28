@@ -1,8 +1,8 @@
 import os
 from dotenv import load_dotenv
 
-# Carica le variabili d'ambiente dal file .env
-load_dotenv()
+# Carica le variabili d'ambiente dal file config.env
+load_dotenv('config.env')
 
 # Configurazione Bot Telegram
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')

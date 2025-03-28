@@ -1,11 +1,12 @@
 import logging
 import io
+import asyncio
 from datetime import datetime, timedelta
 from typing import List
 import matplotlib.pyplot as plt
 from telegram import Bot
 from PIL import Image
-import aiohttp
+import requests
 
 from config.config import TELEGRAM_TOKEN, TELEGRAM_GROUP_ID, PRICE_HISTORY_DAYS
 from src.database.models import Product, PriceHistory
@@ -18,7 +19,7 @@ class NotificationService:
         self.bot = Bot(token=TELEGRAM_TOKEN)
         self.group_id = TELEGRAM_GROUP_ID
 
-    async def _generate_price_chart(self, product: Product) -> io.BytesIO:
+    def _generate_price_chart(self, product: Product) -> io.BytesIO:
         """
         Genera un grafico dello storico prezzi
         
@@ -58,7 +59,7 @@ class NotificationService:
         buf.seek(0)
         return buf
 
-    async def _download_product_image(self, image_url: str) -> io.BytesIO:
+    def _download_product_image(self, image_url: str) -> io.BytesIO:
         """
         Scarica l'immagine del prodotto
         
@@ -69,11 +70,9 @@ class NotificationService:
             Buffer contenente l'immagine
         """
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(image_url) as response:
-                    if response.status == 200:
-                        data = await response.read()
-                        return io.BytesIO(data)
+            response = requests.get(image_url)
+            if response.status_code == 200:
+                return io.BytesIO(response.content)
         except Exception as e:
             logger.error(f"Errore durante il download dell'immagine: {str(e)}")
             return None
@@ -104,7 +103,7 @@ class NotificationService:
             )
             
             # Genera e invia il grafico
-            chart_buffer = await self._generate_price_chart(product)
+            chart_buffer = self._generate_price_chart(product)
             await self.bot.send_photo(
                 chat_id=self.group_id,
                 photo=chart_buffer,
@@ -114,7 +113,7 @@ class NotificationService:
             
             # Se disponibile, invia anche l'immagine del prodotto
             if product.image_url:
-                image_buffer = await self._download_product_image(product.image_url)
+                image_buffer = self._download_product_image(product.image_url)
                 if image_buffer:
                     await self.bot.send_photo(
                         chat_id=self.group_id,
@@ -155,3 +154,14 @@ class NotificationService:
             text=message,
             parse_mode='Markdown'
         )
+
+    # Metodo sincrono per il monitor_service
+    def notify_price_alert(self, product: Product, current_price: float):
+        """Wrapper sincrono per send_price_alert"""
+        loop = asyncio.get_event_loop()
+        loop.create_task(self.send_price_alert(product, current_price))
+
+    def send_status(self, products: List[Product]):
+        """Wrapper sincrono per send_status_message"""
+        loop = asyncio.get_event_loop()
+        loop.create_task(self.send_status_message(products))

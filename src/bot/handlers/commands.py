@@ -57,8 +57,8 @@ class CommandHandlers:
         user_id = update.effective_user.id
         
         try:
-            # Cerca i prodotti su Keepa
-            products = await self.keepa_service.search_products(keyword)
+            # Cerca i prodotti su Keepa (chiamata sincrona)
+            products = self.keepa_service.search_products(keyword)
             
             if not products:
                 await update.message.reply_text(
@@ -147,8 +147,8 @@ class CommandHandlers:
             
             selected_product = temp_data['selected_product']
             
-            # Aggiunge il prodotto al monitoraggio
-            product = await self.monitor_service.add_product_to_monitor(
+            # Aggiunge il prodotto al monitoraggio (chiamata sincrona)
+            product = self.monitor_service.add_product_to_monitor(
                 asin=selected_product['asin'],
                 keyword=temp_data['keyword'],
                 target_price=target_price
@@ -178,16 +178,31 @@ class CommandHandlers:
 
     async def list_products(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Gestisce il comando /list"""
-        products = await self.monitor_service.get_monitored_products()
-        await self.notification_service.send_status_message(products)
+        try:
+            products = self.monitor_service.get_monitored_products()
+            if not products:
+                await update.message.reply_text("📝 Nessun prodotto monitorato.")
+                return
+            
+            message = "📝 Prodotti monitorati:\n\n"
+            for product in products:
+                message += f"• {product.keyword}\n"
+                message += f"  Prezzo target: €{product.target_price:.2f}\n"
+                message += f"  Ultimo prezzo: €{product.last_price:.2f}\n"
+                message += f"  Ultimo controllo: {product.last_check.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            
+            await update.message.reply_text(message)
+        except Exception as e:
+            logger.error(f"Errore durante il listing dei prodotti: {str(e)}")
+            await update.message.reply_text("❌ Si è verificato un errore durante il recupero dei prodotti.")
 
     async def delete_product_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Gestisce il comando /delete"""
-        products = await self.monitor_service.get_monitored_products()
+        products = self.monitor_service.get_monitored_products()
         
         if not products:
             await update.message.reply_text("❌ Nessun prodotto monitorato.")
-            return ConversationHandler.END
+            return
         
         keyboard = []
         for product in products:
@@ -211,7 +226,7 @@ class CommandHandlers:
         
         try:
             asin = query.data.split('_')[1]
-            if await self.monitor_service.remove_product(asin):
+            if self.monitor_service.remove_product(asin):
                 await query.message.reply_text("✅ Prodotto rimosso dal monitoraggio.")
             else:
                 await query.message.reply_text("❌ Prodotto non trovato.")
@@ -222,8 +237,29 @@ class CommandHandlers:
 
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Gestisce il comando /status"""
-        products = await self.monitor_service.get_monitored_products()
-        await self.notification_service.send_status_message(products)
+        try:
+            products = self.monitor_service.get_monitored_products()
+            if not products:
+                await update.message.reply_text("📊 Stato del sistema:\nNessun prodotto monitorato.")
+                return
+            
+            message = "📊 Stato del sistema:\n\n"
+            message += f"Prodotti monitorati: {len(products)}\n\n"
+            
+            for product in products:
+                price_diff = product.last_price - product.target_price
+                status_emoji = "🟢" if price_diff <= 0 else "🔴"
+                
+                message += f"{status_emoji} {product.keyword}\n"
+                message += f"   Target: €{product.target_price:.2f}\n"
+                message += f"   Attuale: €{product.last_price:.2f}\n"
+                message += f"   Differenza: €{price_diff:.2f}\n"
+                message += f"   Ultimo check: {product.last_check.strftime('%H:%M:%S %d/%m/%Y')}\n\n"
+            
+            await update.message.reply_text(message)
+        except Exception as e:
+            logger.error(f"Errore durante il controllo dello stato: {str(e)}")
+            await update.message.reply_text("❌ Si è verificato un errore durante il recupero dello stato.")
 
     def get_handlers(self):
         """

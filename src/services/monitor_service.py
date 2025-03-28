@@ -1,5 +1,5 @@
-import asyncio
 import logging
+import time
 from datetime import datetime
 from typing import List, Optional
 from sqlalchemy.orm import Session
@@ -13,14 +13,15 @@ from config.config import DATABASE_URL, CHECK_INTERVAL
 logger = logging.getLogger(__name__)
 
 class MonitorService:
-    def __init__(self, notification_service):
+    def __init__(self, notification_service, keepa_service):
         """
         Inizializza il servizio di monitoraggio
         
         Args:
             notification_service: Istanza del servizio di notifica
+            keepa_service: Istanza del servizio Keepa
         """
-        self.keepa_service = KeepaService()
+        self.keepa_service = keepa_service
         self.notification_service = notification_service
         self.engine = create_engine(DATABASE_URL)
         self.SessionLocal = sessionmaker(bind=self.engine)
@@ -31,7 +32,7 @@ class MonitorService:
         """Crea una nuova sessione del database"""
         return self.SessionLocal()
 
-    async def add_product_to_monitor(self, asin: str, keyword: str, target_price: float) -> Product:
+    def add_product_to_monitor(self, asin: str, keyword: str, target_price: float) -> Product:
         """
         Aggiunge un nuovo prodotto da monitorare
         
@@ -52,17 +53,17 @@ class MonitorService:
                 existing_product.keyword = keyword
                 db.commit()
                 return existing_product
+# Ottiene il prezzo corrente e il timestamp
+current_price, timestamp = self.keepa_service.get_current_price(asin)
 
-            # Ottiene il prezzo corrente
-            current_price = await self.keepa_service.get_current_price(asin)
-            
-            # Crea nuovo prodotto
-            product = Product(
-                asin=asin,
-                keyword=keyword,
-                target_price=target_price,
-                last_price=current_price,
-                last_check=datetime.utcnow()
+# Crea nuovo prodotto
+product = Product(
+    asin=asin,
+    keyword=keyword,
+    target_price=target_price,
+    last_price=current_price,
+    last_check=timestamp
+)
             )
             
             # Aggiunge il prodotto e la prima entry dello storico prezzi
@@ -85,7 +86,7 @@ class MonitorService:
         finally:
             db.close()
 
-    async def remove_product(self, asin: str) -> bool:
+    def remove_product(self, asin: str) -> bool:
         """
         Rimuove un prodotto dal monitoraggio
         
@@ -110,7 +111,7 @@ class MonitorService:
         finally:
             db.close()
 
-    async def get_monitored_products(self) -> List[Product]:
+    def get_monitored_products(self) -> List[Product]:
         """
         Ottiene la lista di tutti i prodotti monitorati
         
@@ -123,29 +124,30 @@ class MonitorService:
         finally:
             db.close()
 
-    async def check_prices(self):
+    def check_prices(self):
         """Controlla i prezzi di tutti i prodotti monitorati"""
         db = self.get_db()
         try:
             products = db.query(Product).all()
             for product in products:
                 try:
-                    current_price = await self.keepa_service.get_current_price(product.asin)
+                    current_price, timestamp = self.keepa_service.get_current_price(product.asin)
                     
                     # Aggiorna il prezzo nel database
                     product.last_price = current_price
-                    product.last_check = datetime.utcnow()
-                    
+                    product.last_check = timestamp
                     # Aggiunge una nuova entry nello storico prezzi
                     price_history = PriceHistory(
                         product_id=product.id,
-                        price=current_price
+                        price=current_price,
+                        check_date=timestamp
+                    )
                     )
                     db.add(price_history)
                     
                     # Verifica se il prezzo è sceso sotto il target
                     if current_price <= product.target_price:
-                        await self.notification_service.send_price_alert(product, current_price)
+                        self.notification_service.send_price_alert(product, current_price)
                     
                     db.commit()
                     
@@ -158,7 +160,7 @@ class MonitorService:
         finally:
             db.close()
 
-    async def start_monitoring(self):
+    def start_monitoring(self):
         """Avvia il monitoraggio periodico dei prezzi"""
         if self.is_running:
             return
@@ -167,8 +169,8 @@ class MonitorService:
         logger.info("Avvio del monitoraggio prezzi")
         
         while self.is_running:
-            await self.check_prices()
-            await asyncio.sleep(CHECK_INTERVAL)
+            self.check_prices()
+            time.sleep(CHECK_INTERVAL)
 
     def stop_monitoring(self):
         """Ferma il monitoraggio dei prezzi"""

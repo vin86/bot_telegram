@@ -39,15 +39,18 @@ venv\Scripts\activate  # Windows
 pip install -r requirements.txt
 ```
 
-4. Copia il file .env.example in .env:
-```bash
-cp .env.example .env
+4. Modifica il file config.env:
+Apri il file config.env con un editor di testo e inserisci i tuoi dati:
+```
+TELEGRAM_TOKEN=il_tuo_token_bot_telegram
+TELEGRAM_GROUP_ID=id_del_tuo_gruppo
+KEEPA_API_KEY=la_tua_api_key_keepa
 ```
 
-5. Configura le variabili d'ambiente nel file .env:
-- `TELEGRAM_TOKEN`: Token del bot Telegram (ottenuto da @BotFather)
-- `TELEGRAM_GROUP_ID`: ID del gruppo Telegram dove inviare le notifiche
-- `KEEPA_API_KEY`: API Key di Keepa
+Per ottenere questi dati:
+- TELEGRAM_TOKEN: Parla con @BotFather su Telegram e crea un nuovo bot
+- TELEGRAM_GROUP_ID: Crea un gruppo, aggiungi il bot e usa @RawDataBot per ottenere l'ID
+- KEEPA_API_KEY: Registrati su keepa.com e ottieni la tua API key
 
 ## Utilizzo
 
