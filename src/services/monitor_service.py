@@ -53,17 +53,16 @@ class MonitorService:
                 existing_product.keyword = keyword
                 db.commit()
                 return existing_product
-# Ottiene il prezzo corrente e il timestamp
-current_price, timestamp = self.keepa_service.get_current_price(asin)
+            # Ottiene il prezzo corrente e il timestamp
+            current_price, timestamp = self.keepa_service.get_current_price(asin)
 
-# Crea nuovo prodotto
-product = Product(
-    asin=asin,
-    keyword=keyword,
-    target_price=target_price,
-    last_price=current_price,
-    last_check=timestamp
-)
+            # Crea nuovo prodotto
+            product = Product(
+                asin=asin,
+                keyword=keyword,
+                target_price=target_price,
+                last_price=current_price,
+                last_check=timestamp
             )
             
             # Aggiunge il prodotto e la prima entry dello storico prezzi
@@ -72,7 +71,8 @@ product = Product(
             
             price_history = PriceHistory(
                 product_id=product.id,
-                price=current_price
+                price=current_price,
+                check_date=timestamp
             )
             db.add(price_history)
             
@@ -141,7 +141,6 @@ product = Product(
                         product_id=product.id,
                         price=current_price,
                         check_date=timestamp
-                    )
                     )
                     db.add(price_history)
                     

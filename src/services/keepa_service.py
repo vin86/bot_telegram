@@ -126,7 +126,7 @@ class KeepaService:
                 # Cerca per titolo
                 search_params = {
                     'title': keyword,
-                    'productType': 'STANDARD'
+                    'productType': 0  # 0 = STANDARD product type in Keepa API
                 }
                 asins = self.api.product_finder(search_params, domain='IT')
             
@@ -155,8 +155,8 @@ class KeepaService:
                     continue
                     
                 try:
-                    # Estrae il prezzo
-                    current_price = self._extract_price(product)
+                    # Estrae il prezzo e il timestamp
+                    current_price, timestamp = self._extract_price(product)
                     
                     # Verifica che l'ASIN sia presente
                     asin = product.get('asin')
@@ -221,8 +221,8 @@ class KeepaService:
         self._check_rate_limit()
         
         try:
-            # Ottiene i dati del prodotto
-            products = self.api.query(asin)
+            # Ottiene i dati del prodotto forzando l'aggiornamento
+            products = self.api.query(asin, offers=1, update=1)
             if not products or not isinstance(products, list) or len(products) == 0:
                 raise ValueError(f"Prodotto non trovato: {asin}")
             
@@ -232,8 +232,8 @@ class KeepaService:
             
             logger.debug(f"Dati prodotto grezzi: {product}")
             
-            # Estrae il prezzo corrente
-            current_price = self._extract_price(product)
+            # Estrae il prezzo corrente e il timestamp
+            current_price, last_update = self._extract_price(product)
             if current_price == 0.0:
                 raise ValueError(f"Prezzo non disponibile per: {asin}")
             
@@ -242,6 +242,7 @@ class KeepaService:
                 'asin': asin,
                 'title': product.get('title', 'Titolo non disponibile'),
                 'current_price': current_price,
+                'last_update': last_update.strftime('%Y-%m-%d %H:%M:%S'),
                 'lowest_price': current_price,  # Per ora usiamo il prezzo corrente
                 'highest_price': current_price, # Per ora usiamo il prezzo corrente
                 'image_url': (product.get('imagesCSV', '').split(',')[0]
@@ -269,7 +270,7 @@ class KeepaService:
         """
         try:
             self._check_rate_limit()
-            products = self.api.query(asin)
+            products = self.api.query(asin, offers=1, update=1)
             if not products or not isinstance(products, list) or len(products) == 0:
                 raise ValueError(f"Prodotto non trovato: {asin}")
             
