@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
@@ -10,6 +11,9 @@ logger = logging.getLogger(__name__)
 
 # Stati della conversazione
 KEYWORD, SELECT_PRODUCT, TARGET_PRICE = range(3)
+
+# Timeout della conversazione (in secondi)
+CONVERSATION_TIMEOUT = 300  # 5 minuti
 
 class CommandHandlers:
     def __init__(self, monitor_service: MonitorService, notification_service: NotificationService):
@@ -26,6 +30,39 @@ class CommandHandlers:
         
         # Dizionario temporaneo per memorizzare i dati della conversazione
         self.temp_data = {}
+        # Timer per la pulizia dei dati temporanei
+        self._schedule_cleanup()
+
+    def _schedule_cleanup(self):
+        """Programma la pulizia periodica dei dati temporanei"""
+        self._cleanup_temp_data()
+
+    def _cleanup_temp_data(self):
+        """Rimuove i dati temporanei scaduti"""
+        now = datetime.now()
+        expired_keys = []
+        
+        for user_id, data in self.temp_data.items():
+            if 'timestamp' in data:
+                if now - data['timestamp'] > timedelta(seconds=CONVERSATION_TIMEOUT):
+                    expired_keys.append(user_id)
+        
+        for key in expired_keys:
+            del self.temp_data[key]
+            
+        if expired_keys:
+            logger.debug(f"Rimossi {len(expired_keys)} record scaduti dai dati temporanei")
+
+    async def _timeout_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Gestisce il timeout della conversazione"""
+        user_id = update.effective_user.id
+        if user_id in self.temp_data:
+            del self.temp_data[user_id]
+        
+        await update.message.reply_text(
+            "⏰ Timeout della conversazione. Usa /monitor per iniziare una nuova ricerca."
+        )
+        return ConversationHandler.END
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Gestisce il comando /start"""
@@ -46,6 +83,12 @@ class CommandHandlers:
 
     async def monitor_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Avvia il processo di monitoraggio di un nuovo prodotto"""
+        # Imposta il timer di timeout
+        context.job_queue.run_once(
+            lambda ctx: self._timeout_handler(update, context),
+            CONVERSATION_TIMEOUT
+        )
+        
         await update.message.reply_text(
             "🔍 Inserisci la parola chiave per cercare il prodotto:"
         )
@@ -57,7 +100,7 @@ class CommandHandlers:
         user_id = update.effective_user.id
         
         try:
-            # Cerca i prodotti su Keepa (chiamata sincrona)
+            # Cerca i prodotti su Keepa
             products = self.keepa_service.search_products(keyword)
             
             if not products:
@@ -69,7 +112,8 @@ class CommandHandlers:
             # Memorizza i risultati temporaneamente
             self.temp_data[user_id] = {
                 'keyword': keyword,
-                'products': products
+                'products': products,
+                'timestamp': datetime.now()
             }
             
             # Crea la tastiera inline con i prodotti
@@ -82,6 +126,11 @@ class CommandHandlers:
                     callback_data=f"product_{i}"
                 )]
                 keyboard.append(button)
+            
+            # Aggiungi pulsante di cancellazione
+            keyboard.append([
+                InlineKeyboardButton("❌ Annulla", callback_data="cancel")
+            ])
             
             reply_markup = InlineKeyboardMarkup(keyboard)
             
@@ -106,8 +155,14 @@ class CommandHandlers:
         try:
             await query.answer()
             
+            if query.data == "cancel":
+                if user_id in self.temp_data:
+                    del self.temp_data[user_id]
+                await query.message.reply_text("❌ Operazione annullata.")
+                return ConversationHandler.END
+            
             # Recupera i dati temporanei
-            temp_data = self.temp_data.get(user_id, {})
+            temp_data = self.temp_data.get(user_id)
             if not temp_data:
                 await query.message.reply_text("❌ Sessione scaduta. Riavvia il processo con /monitor")
                 return ConversationHandler.END
@@ -116,8 +171,9 @@ class CommandHandlers:
             product_index = int(query.data.split('_')[1])
             selected_product = temp_data['products'][product_index]
             
-            # Memorizza il prodotto selezionato
+            # Aggiorna il timestamp
             temp_data['selected_product'] = selected_product
+            temp_data['timestamp'] = datetime.now()
             self.temp_data[user_id] = temp_data
             
             await query.message.reply_text(
@@ -140,14 +196,14 @@ class CommandHandlers:
                 raise ValueError("Il prezzo deve essere maggiore di 0")
                 
             # Recupera i dati temporanei
-            temp_data = self.temp_data.get(user_id, {})
+            temp_data = self.temp_data.get(user_id)
             if not temp_data:
                 await update.message.reply_text("❌ Sessione scaduta. Riavvia il processo con /monitor")
                 return ConversationHandler.END
             
             selected_product = temp_data['selected_product']
             
-            # Aggiunge il prodotto al monitoraggio (chiamata sincrona)
+            # Aggiunge il prodotto al monitoraggio
             product = self.monitor_service.add_product_to_monitor(
                 asin=selected_product['asin'],
                 keyword=temp_data['keyword'],
@@ -212,6 +268,11 @@ class CommandHandlers:
             )]
             keyboard.append(button)
         
+        # Aggiungi pulsante di cancellazione
+        keyboard.append([
+            InlineKeyboardButton("❌ Annulla", callback_data="cancel_delete")
+        ])
+        
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
@@ -223,6 +284,10 @@ class CommandHandlers:
         """Gestisce la selezione del prodotto da eliminare"""
         query = update.callback_query
         await query.answer()
+        
+        if query.data == "cancel_delete":
+            await query.message.reply_text("❌ Operazione annullata.")
+            return
         
         try:
             asin = query.data.split('_')[1]
@@ -272,10 +337,14 @@ class CommandHandlers:
             entry_points=[CommandHandler('monitor', self.monitor_start)],
             states={
                 KEYWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.monitor_keyword)],
-                SELECT_PRODUCT: [CallbackQueryHandler(self.monitor_select_product, pattern='^product_')],
+                SELECT_PRODUCT: [CallbackQueryHandler(self.monitor_select_product, pattern='^(product_|cancel)')],
                 TARGET_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.monitor_target_price)]
             },
-            fallbacks=[CommandHandler('cancel', lambda u, c: ConversationHandler.END)]
+            fallbacks=[
+                CommandHandler('cancel', lambda u, c: ConversationHandler.END),
+                MessageHandler(filters.COMMAND, lambda u, c: ConversationHandler.END)
+            ],
+            conversation_timeout=CONVERSATION_TIMEOUT
         )
         
         return [
@@ -284,6 +353,6 @@ class CommandHandlers:
             monitor_conv_handler,
             CommandHandler('list', self.list_products),
             CommandHandler('delete', self.delete_product_start),
-            CallbackQueryHandler(self.delete_product_select, pattern='^delete_'),
+            CallbackQueryHandler(self.delete_product_select, pattern='^(delete_|cancel_delete)'),
             CommandHandler('status', self.status)
         ]

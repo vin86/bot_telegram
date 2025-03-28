@@ -15,6 +15,7 @@ class KeepaService:
         self.api = keepa.Keepa(KEEPA_API_KEY)
         self.request_times: List[datetime] = []
         self.cache: Dict[str, tuple[dict, datetime]] = {}
+        self._clean_cache()  # Pulisce la cache all'avvio
         
     def _check_rate_limit(self):
         """Gestisce il rate limiting delle richieste API"""
@@ -29,74 +30,79 @@ class KeepaService:
         
         self.request_times.append(now)
 
+    def _clean_cache(self):
+        """Rimuove le entry scadute dalla cache"""
+        now = datetime.utcnow()
+        expired_keys = [
+            key for key, (_, timestamp) in self.cache.items()
+            if now - timestamp >= timedelta(seconds=CACHE_DURATION)
+        ]
+        for key in expired_keys:
+            del self.cache[key]
+        if expired_keys:
+            logger.debug(f"Rimosse {len(expired_keys)} entry scadute dalla cache")
+
     def _get_from_cache(self, key: str) -> Optional[dict]:
         """Recupera i dati dalla cache se ancora validi"""
+        self._clean_cache()  # Pulisce la cache prima di ogni accesso
         if key in self.cache:
             data, timestamp = self.cache[key]
-            if datetime.utcnow() - timestamp < timedelta(seconds=CACHE_DURATION):
-                logger.debug(f"Cache hit per {key}")
-                return data
-            else:
-                del self.cache[key]
+            logger.debug(f"Cache hit per {key}")
+            return data
         return None
 
     def _save_to_cache(self, key: str, data: dict):
         """Salva i dati nella cache"""
         self.cache[key] = (data, datetime.utcnow())
 
-    def _extract_price(self, product: dict) -> tuple[float, datetime]:
+    def _extract_price_history(self, product: dict) -> tuple[float, float, float, datetime]:
         """
-        Estrae il prezzo più recente da un prodotto
+        Estrae lo storico prezzi completo
         
         Returns:
-            Tupla con (prezzo, timestamp)
+            Tupla con (prezzo corrente, prezzo minimo, prezzo massimo, timestamp)
         """
         try:
-            logger.debug(f"Estrazione prezzo per ASIN: {product.get('asin')}")
-            
-            # Prova prima con stats perché contiene il prezzo più recente
-            if 'stats' in product and isinstance(product['stats'], dict):
-                logger.debug(f"Stats disponibile: {product['stats'].keys()}")
+            asin = product.get('asin')
+            logger.debug(f"Estrazione prezzi per ASIN: {asin}")
+
+            current_price = 0.0
+            min_price = float('inf')
+            max_price = 0.0
+            now = datetime.utcnow()
+
+            if 'stats' in product and product['stats']:
                 stats = product['stats']
-                if 'current' in stats and stats['current'] and stats['current'][0] > 0:
-                    price = float(stats['current'][0]) / 100
-                    logger.debug(f"Prezzo corrente trovato in stats: {price}")
-                    return price, datetime.utcnow()
-
-            # Poi prova con il campo csv che contiene i dati grezzi
-            if 'csv' in product and product['csv']:
-                logger.debug(f"CSV disponibile: {product['csv']}")
-                # Il primo array (indice 0) contiene i prezzi Amazon
-                amazon_prices = product['csv'][0] if len(product['csv']) > 0 else []
-                amazon_times = product['csv'][1] if len(product['csv']) > 1 else []  # Array dei timestamp
                 
-                if amazon_prices and amazon_times:
-                    # Cerca l'ultimo prezzo valido
-                    for i, price in enumerate(reversed(amazon_prices)):
-                        if price is not None and price > 0:
-                            price = float(price) / 100  # Converti centesimi in euro
-                            timestamp = datetime.fromtimestamp(amazon_times[-(i+1)])
-                            logger.debug(f"Prezzo trovato in csv[0]: {price} al {timestamp}")
-                            return price, timestamp
+                # Estrai il prezzo corrente
+                if 'current' in stats and stats['current'] and len(stats['current']) > 0:
+                    current_price = float(stats['current'][0]) / 100 if stats['current'][0] > 0 else 0.0
+                
+                # Estrai min/max dagli ultimi 90 giorni se disponibili
+                if 'price90days' in stats:
+                    prices = [p for p in stats['price90days'] if p and p > 0]
+                    if prices:
+                        min_price = min(prices) / 100
+                        max_price = max(prices) / 100
 
-            # Se non trova niente in csv, prova a ottenere il prezzo dai dati Amazon
-            if 'data' in product and isinstance(product['data'], dict):
-                logger.debug(f"Data disponibile: {product['data'].keys()}")
-                for key in ['AMAZON', 'AMAZON_NEW', 'MARKET_NEW']:
-                    price_data = product['data'].get(key, [])
-                    if price_data:
-                        for price in reversed(price_data):
-                            if price is not None and price > 0:
-                                price = float(price) / 100
-                                logger.debug(f"Prezzo trovato in data/{key}: {price}")
-                                return price, datetime.utcnow()
+            # Se non abbiamo trovato prezzi storici, usa il prezzo corrente
+            if min_price == float('inf'):
+                min_price = current_price
+            if max_price == 0.0:
+                max_price = current_price
 
-            logger.warning(f"Nessun prezzo valido trovato per ASIN {product.get('asin')}")
-            return 0.0, datetime.utcnow()
+            logger.debug(
+                f"Prezzi estratti per {asin}: "
+                f"corrente={current_price}€, "
+                f"min={min_price}€, "
+                f"max={max_price}€"
+            )
+            
+            return current_price, min_price, max_price, now
             
         except Exception as e:
-            logger.error(f"Errore nell'estrazione del prezzo: {str(e)}")
-            return 0.0
+            logger.error(f"Errore nell'estrazione dei prezzi: {str(e)}")
+            return 0.0, 0.0, 0.0, datetime.utcnow()
 
     def search_products(self, keyword: str) -> List[dict]:
         """
@@ -140,7 +146,7 @@ class KeepaService:
             asins = asins[:5]
             
             # Ottiene i dettagli dei prodotti
-            products_data = self.api.query(asins)
+            products_data = self.api.query(asins, domain='IT', stat=True, update=1)
             logger.debug(f"Risposta query prodotti: {products_data}")
             
             if not products_data:
@@ -155,8 +161,8 @@ class KeepaService:
                     continue
                     
                 try:
-                    # Estrae il prezzo e il timestamp
-                    current_price, timestamp = self._extract_price(product)
+                    # Estrae prezzi e timestamp
+                    current_price, min_price, max_price, timestamp = self._extract_price_history(product)
                     
                     # Verifica che l'ASIN sia presente
                     asin = product.get('asin')
@@ -169,6 +175,8 @@ class KeepaService:
                         'asin': asin,
                         'title': product.get('title', 'Titolo non disponibile'),
                         'current_price': current_price,
+                        'lowest_price': min_price,
+                        'highest_price': max_price,
                         'image_url': (product.get('imagesCSV', '').split(',')[0]
                                     if product.get('imagesCSV') else None),
                         'url': f"https://www.amazon.it/dp/{asin}"
@@ -222,7 +230,7 @@ class KeepaService:
         
         try:
             # Ottiene i dati del prodotto forzando l'aggiornamento
-            products = self.api.query(asin, offers=1, update=1)
+            products = self.api.query(asin, domain='IT', stat=True, update=1)
             if not products or not isinstance(products, list) or len(products) == 0:
                 raise ValueError(f"Prodotto non trovato: {asin}")
             
@@ -232,8 +240,8 @@ class KeepaService:
             
             logger.debug(f"Dati prodotto grezzi: {product}")
             
-            # Estrae il prezzo corrente e il timestamp
-            current_price, last_update = self._extract_price(product)
+            # Estrae prezzi e timestamp
+            current_price, min_price, max_price, last_update = self._extract_price_history(product)
             if current_price == 0.0:
                 raise ValueError(f"Prezzo non disponibile per: {asin}")
             
@@ -243,8 +251,8 @@ class KeepaService:
                 'title': product.get('title', 'Titolo non disponibile'),
                 'current_price': current_price,
                 'last_update': last_update.strftime('%Y-%m-%d %H:%M:%S'),
-                'lowest_price': current_price,  # Per ora usiamo il prezzo corrente
-                'highest_price': current_price, # Per ora usiamo il prezzo corrente
+                'lowest_price': min_price,
+                'highest_price': max_price,
                 'image_url': (product.get('imagesCSV', '').split(',')[0]
                             if product.get('imagesCSV') else None),
                 'url': f"https://www.amazon.it/dp/{asin}"
@@ -260,17 +268,27 @@ class KeepaService:
 
     def get_current_price(self, asin: str) -> tuple[float, datetime]:
         """
-        Ottiene il prezzo corrente di un prodotto e il timestamp dell'ultimo aggiornamento
+        Ottiene il prezzo corrente di un prodotto
         
         Args:
             asin: L'ASIN del prodotto Amazon
             
         Returns:
-            Tupla con (prezzo corrente, timestamp ultimo aggiornamento)
+            Tupla con (prezzo corrente, timestamp)
+        
+        Raises:
+            ValueError: Se il prodotto non è trovato o i dati non sono validi
         """
         try:
             self._check_rate_limit()
-            products = self.api.query(asin, offers=1, update=1)
+            
+            # Prima controlla la cache
+            cache_key = f"price_{asin}"
+            cached_data = self._get_from_cache(cache_key)
+            if cached_data:
+                return cached_data['price'], cached_data['timestamp']
+            
+            products = self.api.query(asin, domain='IT', stat=True, update=1)
             if not products or not isinstance(products, list) or len(products) == 0:
                 raise ValueError(f"Prodotto non trovato: {asin}")
             
@@ -278,9 +296,18 @@ class KeepaService:
             if not isinstance(product, dict):
                 raise ValueError(f"Dati prodotto non validi: {asin}")
             
-            price, timestamp = self._extract_price(product)
-            logger.debug(f"Prezzo estratto per {asin}: {price}€ al {timestamp}")
-            return price, timestamp
+            current_price, _, _, timestamp = self._extract_price_history(product)
+            if current_price == 0.0:
+                raise ValueError(f"Prezzo non disponibile per: {asin}")
+            
+            # Salva in cache
+            self._save_to_cache(cache_key, {
+                'price': current_price,
+                'timestamp': timestamp
+            })
+            
+            logger.debug(f"Prezzo estratto per {asin}: {current_price}€ al {timestamp}")
+            return current_price, timestamp
             
         except Exception as e:
             logger.error(f"Errore durante il recupero del prezzo corrente: {str(e)}")
