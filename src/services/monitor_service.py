@@ -1,16 +1,24 @@
 import logging
 import time
-from datetime import datetime
-from typing import List, Optional
+import asyncio
+from datetime import datetime, timedelta
+from typing import List, Optional, Dict, Tuple
 from sqlalchemy.orm import Session
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import SQLAlchemyError, OperationalError
 from sqlalchemy.pool import Pool
+from collections import defaultdict
 
 from src.database.models import Product, PriceHistory
 from src.services.keepa_service import KeepaService
-from config.config import DATABASE_URL, CHECK_INTERVAL
+from config.config import (
+    DATABASE_URL, 
+    CHECK_INTERVAL,
+    PRICE_HISTORY_RETENTION_DAYS,
+    MIN_PRICE_CHANGE_PERCENT,
+    BATCH_SIZE
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +26,7 @@ MAX_RETRIES = 3
 RETRY_DELAY = 5  # secondi
 
 class MonitorService:
-    def __init__(self, notification_service, keepa_service):
+    def __init__(self, notification_service, keepa_service: KeepaService):
         """
         Inizializza il servizio di monitoraggio
         
@@ -32,6 +40,7 @@ class MonitorService:
         self.SessionLocal = sessionmaker(bind=self.engine)
         self.is_running = False
         self.monitoring_task = None
+        self.price_trends: Dict[str, List[float]] = defaultdict(list)
 
     def _create_engine(self):
         """Crea l'engine del database con configurazione ottimizzata"""
@@ -40,8 +49,8 @@ class MonitorService:
             pool_size=5,
             max_overflow=10,
             pool_timeout=30,
-            pool_pre_ping=True,  # Verifica la connessione prima dell'uso
-            pool_recycle=3600    # Ricicla connessioni dopo 1 ora
+            pool_pre_ping=True,
+            pool_recycle=3600
         )
 
     @staticmethod
@@ -65,12 +74,43 @@ class MonitorService:
         """Crea una nuova sessione del database con gestione errori"""
         try:
             db = self.SessionLocal()
-            # Verifica la connessione
-            db.execute("SELECT 1")
+            db.execute(text("SELECT 1"))
             return db
         except SQLAlchemyError as e:
             logger.error(f"Errore creazione sessione DB: {str(e)}")
             raise
+
+    def _cleanup_old_history(self, db: Session):
+        """Rimuove i dati storici più vecchi di PRICE_HISTORY_RETENTION_DAYS"""
+        try:
+            cutoff_date = datetime.utcnow() - timedelta(days=PRICE_HISTORY_RETENTION_DAYS)
+            db.query(PriceHistory).filter(PriceHistory.check_date < cutoff_date).delete()
+            db.commit()
+            logger.info(f"Pulizia storico prezzi precedente a {cutoff_date} completata")
+        except SQLAlchemyError as e:
+            logger.error(f"Errore durante la pulizia dello storico prezzi: {str(e)}")
+            db.rollback()
+
+    def _analyze_price_trend(self, asin: str, current_price: float) -> Tuple[float, str]:
+        """Analizza il trend del prezzo per un prodotto"""
+        prices = self.price_trends[asin]
+        prices.append(current_price)
+        
+        # Mantiene solo gli ultimi 10 prezzi
+        if len(prices) > 10:
+            prices.pop(0)
+        
+        if len(prices) < 2:
+            return 0, "stabile"
+            
+        avg_price = sum(prices[:-1]) / len(prices[:-1])
+        price_change = ((current_price - avg_price) / avg_price) * 100
+        
+        if price_change <= -5:
+            return price_change, "in calo"
+        elif price_change >= 5:
+            return price_change, "in aumento"
+        return price_change, "stabile"
 
     @_retry_on_db_error
     def add_product_to_monitor(self, asin: str, keyword: str, target_price: float) -> Product:
@@ -84,13 +124,9 @@ class MonitorService:
             
         Returns:
             Istanza del prodotto creato
-            
-        Raises:
-            SQLAlchemyError: In caso di errori del database
         """
         db = self.get_db()
         try:
-            # Verifica se il prodotto esiste già
             existing_product = db.query(Product).filter(Product.asin == asin).first()
             if existing_product:
                 existing_product.target_price = target_price
@@ -98,10 +134,8 @@ class MonitorService:
                 db.commit()
                 return existing_product
 
-            # Ottiene il prezzo corrente e il timestamp
             current_price, timestamp = self.keepa_service.get_current_price(asin)
 
-            # Crea nuovo prodotto
             product = Product(
                 asin=asin,
                 keyword=keyword,
@@ -110,9 +144,8 @@ class MonitorService:
                 last_check=timestamp
             )
             
-            # Aggiunge il prodotto e la prima entry dello storico prezzi
             db.add(product)
-            db.flush()  # Per ottenere l'ID del prodotto
+            db.flush()
             
             price_history = PriceHistory(
                 product_id=product.id,
@@ -141,9 +174,6 @@ class MonitorService:
             
         Returns:
             True se il prodotto è stato rimosso con successo
-            
-        Raises:
-            SQLAlchemyError: In caso di errori del database
         """
         db = self.get_db()
         try:
@@ -151,6 +181,7 @@ class MonitorService:
             if product:
                 db.delete(product)
                 db.commit()
+                self.price_trends.pop(asin, None)  # Rimuove il trend dei prezzi
                 return True
             return False
         except SQLAlchemyError as e:
@@ -167,9 +198,6 @@ class MonitorService:
         
         Returns:
             Lista di prodotti monitorati
-            
-        Raises:
-            SQLAlchemyError: In caso di errori del database
         """
         db = self.get_db()
         try:
@@ -177,61 +205,75 @@ class MonitorService:
         finally:
             db.close()
 
-    def check_prices(self):
+    async def check_prices_batch(self, products: List[Product], db: Session):
+        """Controlla i prezzi per un batch di prodotti"""
+        tasks = []
+        for product in products:
+            tasks.append(self.keepa_service.get_current_price(product.asin))
+            
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for product, result in zip(products, results):
+                if isinstance(result, Exception):
+                    logger.error(f"Errore nel controllo prezzo per {product.asin}: {str(result)}")
+                    continue
+                    
+                current_price, timestamp = result
+                
+                # Analizza il trend del prezzo
+                price_change, trend = self._analyze_price_trend(product.asin, current_price)
+                
+                # Aggiorna il prodotto solo se il cambiamento di prezzo è significativo
+                if abs(price_change) >= MIN_PRICE_CHANGE_PERCENT:
+                    product.last_price = current_price
+                    product.last_check = timestamp
+                    
+                    price_history = PriceHistory(
+                        product_id=product.id,
+                        price=current_price,
+                        check_date=timestamp
+                    )
+                    db.add(price_history)
+                    
+                    # Notifica se il prezzo è sceso sotto il target o se c'è un calo significativo
+                    if (current_price <= product.target_price or 
+                        (trend == "in calo" and price_change <= -10)):
+                        await self.notification_service.send_price_alert(
+                            product, 
+                            current_price,
+                            trend=trend,
+                            change_percent=price_change
+                        )
+                    
+            db.commit()
+            
+        except Exception as e:
+            logger.error(f"Errore durante il controllo batch: {str(e)}")
+            db.rollback()
+
+    async def check_prices(self):
         """Controlla i prezzi di tutti i prodotti monitorati"""
+        db = None
         try:
             db = self.get_db()
             products = db.query(Product).all()
             
-            for product in products:
-                retries = 0
-                while retries < MAX_RETRIES:
-                    try:
-                        current_price, timestamp = self.keepa_service.get_current_price(product.asin)
-                        
-                        # Aggiorna il prezzo nel database
-                        product.last_price = current_price
-                        product.last_check = timestamp
-                        
-                        # Aggiunge una nuova entry nello storico prezzi
-                        price_history = PriceHistory(
-                            product_id=product.id,
-                            price=current_price,
-                            check_date=timestamp
-                        )
-                        db.add(price_history)
-                        
-                        # Verifica se il prezzo è sceso sotto il target
-                        if current_price <= product.target_price:
-                            self.notification_service.send_price_alert(product, current_price)
-                        
-                        db.commit()
-                        break  # Esce dal ciclo di retry se l'operazione è riuscita
-                        
-                    except SQLAlchemyError as e:
-                        retries += 1
-                        if retries == MAX_RETRIES:
-                            logger.error(
-                                f"Errore persistente durante l'aggiornamento del prezzo per {product.asin}: {str(e)}"
-                            )
-                            break
-                        logger.warning(
-                            f"Errore durante l'aggiornamento del prezzo per {product.asin}, "
-                            f"tentativo {retries}/{MAX_RETRIES}: {str(e)}"
-                        )
-                        time.sleep(RETRY_DELAY)
-                        db.rollback()
-                    
-                    except Exception as e:
-                        logger.error(f"Errore durante il controllo del prezzo per {product.asin}: {str(e)}")
-                        break
-                        
+            # Cleanup periodico dello storico prezzi
+            self._cleanup_old_history(db)
+            
+            # Processa i prodotti in batch per ottimizzare le chiamate API
+            for i in range(0, len(products), BATCH_SIZE):
+                batch = products[i:i + BATCH_SIZE]
+                await self.check_prices_batch(batch, db)
+                
         except Exception as e:
             logger.error(f"Errore durante il controllo dei prezzi: {str(e)}")
         finally:
-            db.close()
+            if db is not None:
+                db.close()
 
-    def start_monitoring(self):
+    async def start_monitoring(self):
         """Avvia il monitoraggio periodico dei prezzi"""
         if self.is_running:
             return
@@ -241,11 +283,11 @@ class MonitorService:
         
         while self.is_running:
             try:
-                self.check_prices()
+                await self.check_prices()
             except Exception as e:
                 logger.error(f"Errore nel ciclo di monitoraggio: {str(e)}")
             finally:
-                time.sleep(CHECK_INTERVAL)
+                await asyncio.sleep(CHECK_INTERVAL)
 
     def stop_monitoring(self):
         """Ferma il monitoraggio dei prezzi"""

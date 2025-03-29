@@ -1,7 +1,9 @@
 import logging
+import asyncio
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+from typing import Dict, Any
 
 from src.services.keepa_service import KeepaService
 from src.services.monitor_service import MonitorService
@@ -27,42 +29,37 @@ class CommandHandlers:
         self.monitor_service = monitor_service
         self.notification_service = notification_service
         self.keepa_service = KeepaService()
-        
-        # Dizionario temporaneo per memorizzare i dati della conversazione
-        self.temp_data = {}
-        # Timer per la pulizia dei dati temporanei
-        self._schedule_cleanup()
+        self.temp_data: Dict[int, Dict[str, Any]] = {}
+        self._cleanup_task = None
 
-    def _schedule_cleanup(self):
-        """Programma la pulizia periodica dei dati temporanei"""
-        self._cleanup_temp_data()
+    async def start_cleanup_task(self):
+        """Avvia il task di pulizia in background"""
+        if self._cleanup_task is None or self._cleanup_task.done():
+            self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
 
-    def _cleanup_temp_data(self):
+    async def _periodic_cleanup(self):
+        """Task periodico per la pulizia dei dati temporanei"""
+        while True:
+            try:
+                await self._cleanup_temp_data()
+                await asyncio.sleep(60)  # Controlla ogni minuto
+            except Exception as e:
+                logger.error(f"Errore nel task di pulizia: {str(e)}")
+                await asyncio.sleep(300)  # In caso di errore, attende 5 minuti
+
+    async def _cleanup_temp_data(self):
         """Rimuove i dati temporanei scaduti"""
         now = datetime.now()
-        expired_keys = []
-        
-        for user_id, data in self.temp_data.items():
-            if 'timestamp' in data:
-                if now - data['timestamp'] > timedelta(seconds=CONVERSATION_TIMEOUT):
-                    expired_keys.append(user_id)
+        expired_keys = [
+            user_id for user_id, data in self.temp_data.items()
+            if 'timestamp' in data and now - data['timestamp'] > timedelta(seconds=CONVERSATION_TIMEOUT)
+        ]
         
         for key in expired_keys:
             del self.temp_data[key]
             
         if expired_keys:
             logger.debug(f"Rimossi {len(expired_keys)} record scaduti dai dati temporanei")
-
-    async def _timeout_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Gestisce il timeout della conversazione"""
-        user_id = update.effective_user.id
-        if user_id in self.temp_data:
-            del self.temp_data[user_id]
-        
-        await update.message.reply_text(
-            "⏰ Timeout della conversazione. Usa /monitor per iniziare una nuova ricerca."
-        )
-        return ConversationHandler.END
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Gestisce il comando /start"""
@@ -72,7 +69,8 @@ class CommandHandlers:
             "/monitor - Monitora un nuovo prodotto\n"
             "/list - Lista prodotti monitorati\n"
             "/delete - Rimuovi un prodotto dal monitoraggio\n"
-            "/status - Stato del sistema\n"
+            "/status - Stato del sistema con grafici\n"
+            "/history <ASIN> - Storico prezzi di un prodotto\n"
             "/help - Mostra questo messaggio"
         )
         await update.message.reply_text(welcome_message)
@@ -83,14 +81,10 @@ class CommandHandlers:
 
     async def monitor_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Avvia il processo di monitoraggio di un nuovo prodotto"""
-        # Imposta il timer di timeout
-        context.job_queue.run_once(
-            lambda ctx: self._timeout_handler(update, context),
-            CONVERSATION_TIMEOUT
-        )
+        await self.start_cleanup_task()
         
         await update.message.reply_text(
-            "🔍 Inserisci la parola chiave per cercare il prodotto:"
+            "🔍 Inserisci la parola chiave o l'ASIN del prodotto da cercare:"
         )
         return KEYWORD
 
@@ -98,10 +92,11 @@ class CommandHandlers:
         """Gestisce la ricerca del prodotto per parola chiave"""
         keyword = update.message.text
         user_id = update.effective_user.id
+        processing_message = await update.message.reply_text("🔍 Ricerca prodotti in corso...")
         
         try:
-            # Cerca i prodotti su Keepa
-            products = self.keepa_service.search_products(keyword)
+            products = await self.keepa_service.search_products(keyword)
+            await processing_message.delete()
             
             if not products:
                 await update.message.reply_text(
@@ -109,29 +104,26 @@ class CommandHandlers:
                 )
                 return ConversationHandler.END
             
-            # Memorizza i risultati temporaneamente
             self.temp_data[user_id] = {
                 'keyword': keyword,
                 'products': products,
                 'timestamp': datetime.now()
             }
             
-            # Crea la tastiera inline con i prodotti
             keyboard = []
-            for i, product in enumerate(products[:5]):  # Limitiamo a 5 risultati
+            for i, product in enumerate(products[:5]):
                 title = product['title'][:50] + "..." if len(product['title']) > 50 else product['title']
                 price = product['current_price']
+                lowest = product.get('lowest_price', price)
+                highest = product.get('highest_price', price)
+                
                 button = [InlineKeyboardButton(
-                    f"{title} - €{price:.2f}",
+                    f"{title}\n💰 €{price:.2f} (Min: €{lowest:.2f}, Max: €{highest:.2f})",
                     callback_data=f"product_{i}"
                 )]
                 keyboard.append(button)
             
-            # Aggiungi pulsante di cancellazione
-            keyboard.append([
-                InlineKeyboardButton("❌ Annulla", callback_data="cancel")
-            ])
-            
+            keyboard.append([InlineKeyboardButton("❌ Annulla", callback_data="cancel")])
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await update.message.reply_text(
@@ -142,6 +134,7 @@ class CommandHandlers:
             
         except Exception as e:
             logger.error(f"Errore durante la ricerca: {str(e)}")
+            await processing_message.delete()
             await update.message.reply_text(
                 "❌ Si è verificato un errore durante la ricerca. Riprova più tardi."
             )
@@ -158,32 +151,47 @@ class CommandHandlers:
             if query.data == "cancel":
                 if user_id in self.temp_data:
                     del self.temp_data[user_id]
-                await query.message.reply_text("❌ Operazione annullata.")
+                await query.message.edit_text("❌ Operazione annullata.")
                 return ConversationHandler.END
             
-            # Recupera i dati temporanei
             temp_data = self.temp_data.get(user_id)
             if not temp_data:
-                await query.message.reply_text("❌ Sessione scaduta. Riavvia il processo con /monitor")
+                await query.message.edit_text("❌ Sessione scaduta. Riavvia il processo con /monitor")
                 return ConversationHandler.END
             
-            # Ottiene l'indice del prodotto selezionato
             product_index = int(query.data.split('_')[1])
             selected_product = temp_data['products'][product_index]
             
-            # Aggiorna il timestamp
             temp_data['selected_product'] = selected_product
             temp_data['timestamp'] = datetime.now()
             self.temp_data[user_id] = temp_data
             
+            # Mostra il grafico dello storico prezzi
+            price_history = await self.keepa_service.get_product_price_history(selected_product['asin'])
+            
+            await self.notification_service.send_price_alert(
+                product=None,  # Non è ancora un prodotto monitorato
+                current_price=selected_product['current_price'],
+                preview_mode=True,
+                product_data={
+                    'title': selected_product['title'],
+                    'asin': selected_product['asin'],
+                    'url': selected_product['url'],
+                    'image_url': selected_product.get('image_url'),
+                    'price_history': price_history
+                }
+            )
+            
             await query.message.reply_text(
-                f"💰 Inserisci il prezzo target per {selected_product['title'][:50]}..."
+                f"💰 Inserisci il prezzo target per {selected_product['title'][:50]}...\n"
+                f"Prezzo attuale: €{selected_product['current_price']:.2f}\n"
+                f"Minimo storico: €{selected_product.get('lowest_price', selected_product['current_price']):.2f}"
             )
             return TARGET_PRICE
             
         except Exception as e:
             logger.error(f"Errore durante la selezione: {str(e)}")
-            await query.message.reply_text("❌ Si è verificato un errore. Riprova con /monitor")
+            await query.message.edit_text("❌ Si è verificato un errore. Riprova con /monitor")
             return ConversationHandler.END
 
     async def monitor_target_price(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -195,7 +203,6 @@ class CommandHandlers:
             if target_price <= 0:
                 raise ValueError("Il prezzo deve essere maggiore di 0")
                 
-            # Recupera i dati temporanei
             temp_data = self.temp_data.get(user_id)
             if not temp_data:
                 await update.message.reply_text("❌ Sessione scaduta. Riavvia il processo con /monitor")
@@ -203,14 +210,12 @@ class CommandHandlers:
             
             selected_product = temp_data['selected_product']
             
-            # Aggiunge il prodotto al monitoraggio
-            product = self.monitor_service.add_product_to_monitor(
+            product = await self.monitor_service.add_product_to_monitor(
                 asin=selected_product['asin'],
                 keyword=temp_data['keyword'],
                 target_price=target_price
             )
             
-            # Pulisce i dati temporanei
             del self.temp_data[user_id]
             
             await update.message.reply_text(
@@ -235,26 +240,22 @@ class CommandHandlers:
     async def list_products(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Gestisce il comando /list"""
         try:
-            products = self.monitor_service.get_monitored_products()
+            products = await self.monitor_service.get_monitored_products()
             if not products:
                 await update.message.reply_text("📝 Nessun prodotto monitorato.")
                 return
             
-            message = "📝 Prodotti monitorati:\n\n"
-            for product in products:
-                message += f"• {product.keyword}\n"
-                message += f"  Prezzo target: €{product.target_price:.2f}\n"
-                message += f"  Ultimo prezzo: €{product.last_price:.2f}\n"
-                message += f"  Ultimo controllo: {product.last_check.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            await self.notification_service.send_status_message(products)
             
-            await update.message.reply_text(message)
         except Exception as e:
             logger.error(f"Errore durante il listing dei prodotti: {str(e)}")
-            await update.message.reply_text("❌ Si è verificato un errore durante il recupero dei prodotti.")
+            await update.message.reply_text(
+                "❌ Si è verificato un errore durante il recupero dei prodotti."
+            )
 
     async def delete_product_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Gestisce il comando /delete"""
-        products = self.monitor_service.get_monitored_products()
+        products = await self.monitor_service.get_monitored_products()
         
         if not products:
             await update.message.reply_text("❌ Nessun prodotto monitorato.")
@@ -262,17 +263,18 @@ class CommandHandlers:
         
         keyboard = []
         for product in products:
+            current_price = product.last_price
+            target_price = product.target_price
+            diff = current_price - target_price
+            status_emoji = "🟢" if diff <= 0 else "🔴"
+            
             button = [InlineKeyboardButton(
-                f"{product.keyword} - €{product.target_price:.2f}",
+                f"{status_emoji} {product.keyword} - Target: €{target_price:.2f}",
                 callback_data=f"delete_{product.asin}"
             )]
             keyboard.append(button)
         
-        # Aggiungi pulsante di cancellazione
-        keyboard.append([
-            InlineKeyboardButton("❌ Annulla", callback_data="cancel_delete")
-        ])
-        
+        keyboard.append([InlineKeyboardButton("❌ Annulla", callback_data="cancel_delete")])
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
@@ -286,45 +288,61 @@ class CommandHandlers:
         await query.answer()
         
         if query.data == "cancel_delete":
-            await query.message.reply_text("❌ Operazione annullata.")
+            await query.message.edit_text("❌ Operazione annullata.")
             return
         
         try:
             asin = query.data.split('_')[1]
-            if self.monitor_service.remove_product(asin):
-                await query.message.reply_text("✅ Prodotto rimosso dal monitoraggio.")
+            if await self.monitor_service.remove_product(asin):
+                await query.message.edit_text("✅ Prodotto rimosso dal monitoraggio.")
             else:
-                await query.message.reply_text("❌ Prodotto non trovato.")
+                await query.message.edit_text("❌ Prodotto non trovato.")
                 
         except Exception as e:
             logger.error(f"Errore durante la rimozione: {str(e)}")
-            await query.message.reply_text("❌ Si è verificato un errore durante la rimozione.")
+            await query.message.edit_text(
+                "❌ Si è verificato un errore durante la rimozione."
+            )
 
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Gestisce il comando /status"""
         try:
-            products = self.monitor_service.get_monitored_products()
-            if not products:
-                await update.message.reply_text("📊 Stato del sistema:\nNessun prodotto monitorato.")
-                return
-            
-            message = "📊 Stato del sistema:\n\n"
-            message += f"Prodotti monitorati: {len(products)}\n\n"
-            
-            for product in products:
-                price_diff = product.last_price - product.target_price
-                status_emoji = "🟢" if price_diff <= 0 else "🔴"
-                
-                message += f"{status_emoji} {product.keyword}\n"
-                message += f"   Target: €{product.target_price:.2f}\n"
-                message += f"   Attuale: €{product.last_price:.2f}\n"
-                message += f"   Differenza: €{price_diff:.2f}\n"
-                message += f"   Ultimo check: {product.last_check.strftime('%H:%M:%S %d/%m/%Y')}\n\n"
-            
-            await update.message.reply_text(message)
+            products = await self.monitor_service.get_monitored_products()
+            await self.notification_service.send_status_message(
+                products, include_charts=True
+            )
         except Exception as e:
             logger.error(f"Errore durante il controllo dello stato: {str(e)}")
-            await update.message.reply_text("❌ Si è verificato un errore durante il recupero dello stato.")
+            await update.message.reply_text(
+                "❌ Si è verificato un errore durante il recupero dello stato."
+            )
+
+    async def history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Gestisce il comando /history"""
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Specificare l'ASIN del prodotto (es. /history B0088PUEPK)"
+            )
+            return
+            
+        asin = context.args[0]
+        try:
+            price_history = await self.keepa_service.get_product_price_history(asin)
+            if not price_history:
+                await update.message.reply_text(
+                    "❌ Prodotto non trovato o storico prezzi non disponibile."
+                )
+                return
+                
+            await self.notification_service.send_price_history(
+                price_history, include_trend=True
+            )
+            
+        except Exception as e:
+            logger.error(f"Errore nel recupero dello storico prezzi: {str(e)}")
+            await update.message.reply_text(
+                "❌ Si è verificato un errore nel recupero dello storico prezzi."
+            )
 
     def get_handlers(self):
         """
@@ -354,5 +372,6 @@ class CommandHandlers:
             CommandHandler('list', self.list_products),
             CommandHandler('delete', self.delete_product_start),
             CallbackQueryHandler(self.delete_product_select, pattern='^(delete_|cancel_delete)'),
-            CommandHandler('status', self.status)
+            CommandHandler('status', self.status),
+            CommandHandler('history', self.history)
         ]
